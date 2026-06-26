@@ -1,26 +1,55 @@
 {
   "name": "ai-brainstorm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
+  "main": "dist-electron/main.js",
+  "engines": {
+    "node": ">=20 <25"
+  },
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -H 0.0.0.0",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "start:prod": "npx kill-port 3000 && next start",
+    "lint": "eslint",
+    "kill-port": "npx kill-port 3000",
+    "dev:clean": "npx kill-port 3000 && next dev -H 0.0.0.0",
+    "setup": "npm install && node scripts/rebuild-sqlite.cjs && npx prisma generate && npx prisma db push && npx tsx prisma/seed.ts",
+    "rebuild:sqlite": "node scripts/rebuild-sqlite.cjs",
+    "electron:ts": "tsc -p electron/tsconfig.json",
+    "electron:prepare": "node scripts/prepare-electron.cjs",
+    "rebuild:node": "npm rebuild better-sqlite3",
+    "rebuild:electron": "electron-rebuild -f -w better-sqlite3",
+    "electron:dev": "npm run electron:ts && npm run rebuild:node && concurrently -k -n NEXT,ELC \"next dev\" \"wait-on tcp:3000 && electron .\"",
+    "electron:build": "npm run build && npm run electron:prepare && npm run electron:ts && electron-builder --win"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^3.0.74",
+    "@prisma/adapter-better-sqlite3": "^7.8.0",
+    "@prisma/client": "^7.8.0",
+    "ai": "^6.0.208",
+    "better-sqlite3": "^12.11.1",
     "next": "16.2.9",
+    "prisma": "^7.8.0",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.0.4",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^10.0.3",
+    "electron": "^42.5.0",
+    "electron-builder": "^26.15.3",
     "eslint": "^9",
     "eslint-config-next": "16.2.9",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "tsx": "^4",
+    "typescript": "^5",
+    "wait-on": "^9.0.10"
   }
 }

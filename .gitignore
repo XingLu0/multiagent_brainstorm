@@ -15,6 +15,7 @@
 
 # next.js
 /.next/
+/.next-*/
 /out/
 
 # production
@@ -39,3 +40,21 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# prisma
+/prisma/app.db
+/prisma/app.db-journal
+/prisma/app-template.db
+/prisma/app-template.db-journal
+/src/generated/
+
+# electron
+/electron-build/
+/dist-electron/
+
+# AI assistant configs (internal, not for public repo)
+/AGENTS.md
+/CLAUDE.md
+
+# legacy server entry (standalone build generates its own)
+/server.js

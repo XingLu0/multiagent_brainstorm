@@ -1,0 +1,63 @@
+datasource db {
+  provider = "sqlite"
+}
+
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../src/generated/client"
+  binaryTargets = ["native"]
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  title       String
+  expertIds   String
+  status      String   @default("active")
+  turnCount   Int      @default(0)
+  createdAt   DateTime @default(now())
+  completedAt DateTime?
+  messages    Message[]
+  documents   GeneratedDocument[]
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  role      String
+  content   String
+  metadata  String?
+  seq       Int
+  createdAt DateTime @default(now())
+
+  @@index([projectId, seq])
+  @@index([projectId, createdAt])
+}
+
+model ExpertDefinition {
+  id          String   @id @default(cuid())
+  name        String
+  avatarColor String   @default("emerald")
+  persona     String
+  focus       String
+  isBuiltin   Boolean  @default(false)
+  builtinId   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isBuiltin])
+}
+
+model GeneratedDocument {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  docType   String
+  content   String
+  createdAt DateTime @default(now())
+
+  @@index([projectId, docType])
+}

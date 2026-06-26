@@ -1,0 +1,26 @@
+appId: com.ai-brainstorm.desktop
+productName: AI脑暴
+copyright: Copyright © 2026
+directories:
+  output: electron-build
+files:
+  - dist-electron/**/*
+  - package.json
+extraResources:
+  - from: .next/standalone
+    to: app
+asar: false
+npmRebuild: false
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-${arch}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: AI脑暴
