@@ -28,7 +28,8 @@ export class ExpertAgent {
     abortSignal?: AbortSignal,
     requireHook: boolean = true,
     onToolCall?: (toolName: string, input: unknown) => void,
-    onToolResult?: (toolName: string, input: unknown, output: unknown) => void
+    onToolResult?: (toolName: string, input: unknown, output: unknown) => void,
+    phase: "diverge" | "converge" = "diverge"
   ): Promise<string> {
     const expert = await getExpertById(expertId);
     if (!expert) {
@@ -38,7 +39,7 @@ export class ExpertAgent {
     const currentDate = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Hong_Kong" });
     const result = streamText({
       model: this.model,
-      system: buildExpertSystemPrompt(expert, currentDate, requireHook),
+      system: buildExpertSystemPrompt(expert, currentDate, requireHook, phase),
       prompt: buildExpertUserPrompt(hostGuidance, userMessage, conversationContext),
       maxOutputTokens: Math.max(this.llmConfig.maxTokens, 3072),
       temperature: this.llmConfig.temperature,

@@ -1,24 +1,27 @@
 "use client";
 
 import React, { useState } from "react";
+import type { DocumentType } from "@/lib/engine/document-agent";
+import { DOC_TYPE_LABELS } from "@/lib/engine/document-agent";
 
 interface PasteAreaProps {
   value: string;
   onChange: (value: string) => void;
-  onSubmit: (docType: "prd" | "spec") => void;
+  onSubmit: (docType: DocumentType) => void;
   isGenerating: boolean;
 }
 
 const MIN_CONTENT_LENGTH = 50;
 
 /**
- * Textarea for pasting content with PRD/SPEC generation buttons.
+ * Textarea for pasting content with a document-type selector and generation button.
  * Validates that content is >= 50 chars on submit attempt.
  */
 export function PasteArea({ value, onChange, onSubmit, isGenerating }: PasteAreaProps) {
   const [showError, setShowError] = useState(false);
+  const [selectedType, setSelectedType] = useState<DocumentType>("prd");
 
-  const handleSubmit = (docType: "prd" | "spec") => {
+  const handleSubmit = (docType: DocumentType) => {
     if (value.trim().length < MIN_CONTENT_LENGTH) {
       setShowError(true);
       return;
@@ -63,21 +66,25 @@ export function PasteArea({ value, onChange, onSubmit, isGenerating }: PasteArea
       </div>
 
       <div className="flex gap-2">
+        <select
+          value={selectedType}
+          onChange={(e) => setSelectedType(e.target.value as DocumentType)}
+          disabled={isGenerating}
+          className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none transition-colors focus:border-blue-500 focus:ring-1 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {(Object.keys(DOC_TYPE_LABELS) as DocumentType[]).map((type) => (
+            <option key={type} value={type}>
+              {DOC_TYPE_LABELS[type]}
+            </option>
+          ))}
+        </select>
         <button
           type="button"
-          onClick={() => handleSubmit("prd")}
+          onClick={() => handleSubmit(selectedType)}
           disabled={isGenerating}
           className="flex-1 rounded-lg bg-blue-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {isGenerating ? "文档生成中..." : "生成PRD草稿"}
-        </button>
-        <button
-          type="button"
-          onClick={() => handleSubmit("spec")}
-          disabled={isGenerating}
-          className="flex-1 rounded-lg bg-violet-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-600 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {isGenerating ? "文档生成中..." : "生成SPEC草稿"}
+          {isGenerating ? "文档生成中..." : "生成文档"}
         </button>
       </div>
     </div>

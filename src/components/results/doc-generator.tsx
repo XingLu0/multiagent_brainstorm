@@ -5,6 +5,8 @@ import { PasteArea } from "./paste-area";
 import { MarkdownViewer } from "./markdown-viewer";
 import { parseSSEStream } from "@/lib/sse";
 import { fetchWithConfig } from "@/lib/client-config";
+import type { DocumentType } from "@/lib/engine/document-agent";
+import { DOC_TYPE_LABELS } from "@/lib/engine/document-agent";
 
 interface DocGeneratorProps {
   projectId: string;
@@ -21,7 +23,7 @@ export function DocGenerator({ projectId, initialContent = "" }: DocGeneratorPro
   const [content, setContent] = useState(initialContent);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedDoc, setGeneratedDoc] = useState("");
-  const [docType, setDocType] = useState<"prd" | "spec" | null>(null);
+  const [docType, setDocType] = useState<DocumentType | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -36,7 +38,7 @@ export function DocGenerator({ projectId, initialContent = "" }: DocGeneratorPro
   }, [toast]);
 
   const handleGenerate = useCallback(
-    async (type: "prd" | "spec") => {
+    async (type: DocumentType) => {
       setIsGenerating(true);
       setError(null);
       setGeneratedDoc("");
@@ -141,7 +143,7 @@ export function DocGenerator({ projectId, initialContent = "" }: DocGeneratorPro
               <span className="h-2 w-2 animate-bounce rounded-full bg-gray-400"></span>
             </div>
             <span className="text-sm">
-              正在生成{docType === "prd" ? "PRD" : "SPEC"}文档...
+              {docType ? `正在生成${DOC_TYPE_LABELS[docType]}文档...` : "正在生成文档..."}
             </span>
           </div>
         </div>
@@ -150,7 +152,7 @@ export function DocGenerator({ projectId, initialContent = "" }: DocGeneratorPro
       {generatedDoc && (
         <div className="space-y-2">
           <h3 className="text-sm font-semibold text-gray-700">
-            {docType === "prd" ? "PRD 草稿" : "SPEC 草稿"}
+            {docType ? DOC_TYPE_LABELS[docType] : "文档草稿"}
           </h3>
           <MarkdownViewer content={generatedDoc} copyLabel="复制文档" />
         </div>

@@ -105,12 +105,13 @@ export class HostAgent {
     conversationHistory: { role: string; content: string }[],
     onChunk: (chunk: string) => void,
     abortSignal?: AbortSignal,
-    onToolCall?: (toolName: string, input: unknown) => void
+    onToolCall?: (toolName: string, input: unknown) => void,
+    phase: "diverge" | "converge" = "diverge"
   ): Promise<HostGuideResult> {
     const experts = await getExpertsByIds(expertIds);
     const currentDate = getCurrentDateString();
     const messages = [
-      { role: "system" as const, content: buildHostSystemPrompt(currentDate) },
+      { role: "system" as const, content: buildHostSystemPrompt(currentDate, phase) },
       ...conversationHistory.map((m) => ({
         role: "user" as const,
         content: m.content,

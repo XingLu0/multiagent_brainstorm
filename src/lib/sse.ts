@@ -5,6 +5,7 @@ export type SSEEventType =
   | "summary"
   | "minutes"
   | "document"
+  | "mindmap"
   | "error"
   | "done"
   | "ping"
@@ -56,6 +57,7 @@ export async function parseSSEStream(
     onSummary?: (data: { content: string }) => void;
     onMinutes?: (data: { content: string }) => void;
     onDocument?: (data: { content: string }) => void;
+    onMindmap?: (data: { content: string }) => void;
     onError?: (data: { message: string; retryable: boolean }) => void;
     onDone?: (data: Record<string, unknown>) => void;
     onToolCall?: (data: { expertId: string | null; toolName: string; input: unknown }) => void;
@@ -100,6 +102,9 @@ export async function parseSSEStream(
             break;
           case "document":
             handlers.onDocument?.(data);
+            break;
+          case "mindmap":
+            handlers.onMindmap?.(data);
             break;
           case "error":
             handlers.onError?.(data);

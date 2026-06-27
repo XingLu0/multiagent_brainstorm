@@ -21,6 +21,9 @@ export async function GET(
         documents: {
           orderBy: { createdAt: "desc" },
         },
+        knowledgeEntries: {
+          select: { category: true },
+        },
       },
     });
 
@@ -31,7 +34,21 @@ export async function GET(
       );
     }
 
-    return NextResponse.json(project);
+    // 按 category 分组统计知识库条目，供状态看板展示共识/分歧计数
+    const knowledgeCounts = project.knowledgeEntries.reduce(
+      (acc, entry) => {
+        if (entry.category === "consensus") acc.consensus += 1;
+        else if (entry.category === "divergence") acc.divergence += 1;
+        return acc;
+      },
+      { consensus: 0, divergence: 0 }
+    );
+
+    // 移除中间统计用的明细列表，避免响应体膨胀
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { knowledgeEntries, ...rest } = project;
+
+    return NextResponse.json({ ...rest, knowledgeCounts });
   } catch (error) {
     console.error("获取项目详情失败:", error);
     return NextResponse.json(

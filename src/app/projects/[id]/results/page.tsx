@@ -3,6 +3,9 @@ import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { MarkdownViewer } from "@/components/results/markdown-viewer";
 import { DocGenerator } from "@/components/results/doc-generator";
+import { MindmapView } from "@/components/results/mindmap-view";
+import { DOC_TYPE_LABELS } from "@/lib/engine/document-agent";
+import type { DocumentType } from "@/lib/engine/document-agent";
 
 export const dynamic = "force-dynamic";
 
@@ -31,7 +34,7 @@ export default async function ResultsPage({ params }: ResultsPageProps) {
     ? minutesDocs.reduce((a, b) => (a.content.length >= b.content.length ? a : b))
     : undefined;
   const generatedDocs = project.documents.filter(
-    (d) => d.docType === "prd" || d.docType === "spec"
+    (d) => d.docType !== "minutes" && d.docType !== "mindmap"
   );
 
   return (
@@ -103,7 +106,7 @@ export default async function ResultsPage({ params }: ResultsPageProps) {
                 {generatedDocs.map((doc) => (
                   <div key={doc.id} className="space-y-1">
                     <span className="text-xs font-medium text-gray-500">
-                      {doc.docType === "prd" ? "PRD 草稿" : "SPEC 草稿"} -{" "}
+                      {DOC_TYPE_LABELS[doc.docType as DocumentType] ?? doc.docType} -{" "}
                       {new Date(doc.createdAt).toLocaleString("zh-CN")}
                     </span>
                     <MarkdownViewer content={doc.content} />
@@ -117,13 +120,19 @@ export default async function ResultsPage({ params }: ResultsPageProps) {
           <div className="space-y-3">
             <h2 className="text-lg font-semibold text-gray-900">生成文档</h2>
             <p className="text-sm text-gray-500">
-              复制左侧纪要内容，修改后粘贴到下方，生成 PRD 或 SPEC 草稿。
+              复制左侧纪要内容，修改后粘贴到下方，选择文档类型生成草稿。
             </p>
             <DocGenerator
               projectId={id}
               initialContent={minutes?.content ?? ""}
             />
           </div>
+        </div>
+
+        {/* 思维导图区域 */}
+        <div className="mt-6 space-y-3">
+          <h2 className="text-lg font-semibold text-gray-900">思维导图</h2>
+          <MindmapView projectId={id} minutesContent={minutes?.content ?? ""} />
         </div>
       </div>
     </main>

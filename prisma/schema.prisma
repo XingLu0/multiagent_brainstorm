@@ -13,11 +13,13 @@ model Project {
   title       String
   expertIds   String
   status      String   @default("active")
+  phase       String   @default("diverge")
   turnCount   Int      @default(0)
   createdAt   DateTime @default(now())
   completedAt DateTime?
   messages    Message[]
   documents   GeneratedDocument[]
+  knowledgeEntries KnowledgeEntry[]
 
   @@index([status])
   @@index([createdAt])
@@ -60,4 +62,16 @@ model GeneratedDocument {
   createdAt DateTime @default(now())
 
   @@index([projectId, docType])
+}
+
+model KnowledgeEntry {
+  id              String   @id @default(cuid())
+  projectId       String
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  category        String
+  content         String
+  sourceMessageId String?
+  createdAt       DateTime @default(now())
+
+  @@index([projectId])
 }
