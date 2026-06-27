@@ -5,8 +5,8 @@ import { PasteArea } from "./paste-area";
 import { MarkdownViewer } from "./markdown-viewer";
 import { parseSSEStream } from "@/lib/sse";
 import { fetchWithConfig } from "@/lib/client-config";
-import type { DocumentType } from "@/lib/engine/document-agent";
-import { DOC_TYPE_LABELS } from "@/lib/engine/document-agent";
+import type { DocumentType } from "@/lib/engine/doc-types";
+import { DOC_TYPE_LABELS } from "@/lib/engine/doc-types";
 
 interface DocGeneratorProps {
   projectId: string;

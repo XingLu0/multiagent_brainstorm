@@ -8,24 +8,10 @@ import { MARKET_ANALYSIS_SYSTEM_PROMPT, buildMarketAnalysisUserPrompt } from "./
 import { ACTION_PLAN_SYSTEM_PROMPT, buildActionPlanUserPrompt } from "./prompts/action-plan";
 import { consumeStream } from "./host-agent";
 import { DEFAULT_CALL_SETTINGS } from "@/lib/llm";
+import type { DocumentType } from "./doc-types";
 
-export type DocumentType =
-  | "prd"
-  | "spec"
-  | "user-story"
-  | "tech-plan"
-  | "market-analysis"
-  | "action-plan";
-
-/** 文档类型 -> 中文标签映射（供前端使用） */
-export const DOC_TYPE_LABELS: Record<DocumentType, string> = {
-  prd: "PRD 产品需求文档",
-  spec: "SPEC 技术规格说明",
-  "user-story": "用户故事地图",
-  "tech-plan": "技术方案",
-  "market-analysis": "市场分析报告",
-  "action-plan": "行动计划",
-};
+// Re-export 客户端安全的类型和常量，保持向后兼容
+export { type DocumentType, DOC_TYPE_LABELS, VALID_DOC_TYPES } from "./doc-types";
 
 /** 文档类型 -> 系统提示词与用户提示词构建器映射 */
 const DOC_PROMPTS: Record<

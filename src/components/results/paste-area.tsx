@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useState } from "react";
-import type { DocumentType } from "@/lib/engine/document-agent";
-import { DOC_TYPE_LABELS } from "@/lib/engine/document-agent";
+import type { DocumentType } from "@/lib/engine/doc-types";
+import { DOC_TYPE_LABELS } from "@/lib/engine/doc-types";
 
 interface PasteAreaProps {
   value: string;

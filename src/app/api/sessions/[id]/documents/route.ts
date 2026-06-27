@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { createSSEResponse } from "@/lib/sse";
 import { createEngineFromRequest } from "@/lib/server-config";
-import type { DocumentType } from "@/lib/engine/document-agent";
+import type { DocumentType } from "@/lib/engine/doc-types";
+import { VALID_DOC_TYPES } from "@/lib/engine/doc-types";
 
 /**
  * POST /api/sessions/[id]/documents
@@ -27,14 +28,6 @@ export async function POST(
   const { type, content } = body;
 
   // 验证文档类型
-  const VALID_DOC_TYPES: DocumentType[] = [
-    "prd",
-    "spec",
-    "user-story",
-    "tech-plan",
-    "market-analysis",
-    "action-plan",
-  ];
   if (!VALID_DOC_TYPES.includes(type)) {
     return NextResponse.json(
       { error: "无效的文档类型" },

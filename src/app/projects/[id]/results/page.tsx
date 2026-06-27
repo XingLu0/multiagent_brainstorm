@@ -4,8 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { MarkdownViewer } from "@/components/results/markdown-viewer";
 import { DocGenerator } from "@/components/results/doc-generator";
 import { MindmapView } from "@/components/results/mindmap-view";
-import { DOC_TYPE_LABELS } from "@/lib/engine/document-agent";
-import type { DocumentType } from "@/lib/engine/document-agent";
+import { DOC_TYPE_LABELS } from "@/lib/engine/doc-types";
+import type { DocumentType } from "@/lib/engine/doc-types";
 
 export const dynamic = "force-dynamic";
 
