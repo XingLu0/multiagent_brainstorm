@@ -36,6 +36,17 @@ export function MessageBubble({
 
   // User message - right aligned, blue, with optional edit
   if (role === "user") {
+    // 解析元数据，判断是否为用户干预指令（/ 开头的方向性干预）
+    let isIntervene = false;
+    if (metadata) {
+      try {
+        const meta = JSON.parse(metadata);
+        if (meta.type === "intervene") isIntervene = true;
+      } catch {
+        // 元数据解析失败，视为普通用户消息
+      }
+    }
+
     if (isEditing) {
       return (
         <div className="flex justify-end">
@@ -80,7 +91,8 @@ export function MessageBubble({
     return (
       <div className="group flex justify-end">
         <div className="relative max-w-[80%]">
-          {editable && onEdit && messageId && (
+          {/* 干预指令不提供编辑入口 */}
+          {!isIntervene && editable && onEdit && messageId && (
             <button
               type="button"
               onClick={() => {
@@ -105,6 +117,13 @@ export function MessageBubble({
                 />
               </svg>
             </button>
+          )}
+          {isIntervene && (
+            <div className="mb-1 flex justify-end">
+              <span className="inline-block rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
+                干预指令
+              </span>
+            </div>
           )}
           <div className="rounded-2xl rounded-br-sm bg-blue-500 px-4 py-2 text-white">
             <p className="whitespace-pre-wrap break-words text-sm">{content}</p>

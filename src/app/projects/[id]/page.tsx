@@ -1,12 +1,22 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useRef, use } from "react";
+import React, { useState, useEffect, useCallback, useRef, use, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ChatStream, type ChatMessage } from "@/components/chat/chat-stream";
-import { InputBar } from "@/components/chat/input-bar";
+import { InputBar, type Attachment } from "@/components/chat/input-bar";
+import { DiscussionDashboard } from "@/components/dashboard/discussion-dashboard";
+import { ExpertPicker } from "@/components/project/expert-picker";
 import { parseSSEStream } from "@/lib/sse";
 import { fetchWithConfig } from "@/lib/client-config";
+import { getExpertColors } from "@/lib/experts/colors";
+import {
+  createInitialState,
+  rebuildStateFromMessages,
+  MAX_EXPERT_ROUNDS,
+  type DiscussionState,
+} from "@/lib/engine/discussion-state";
+import { useExperts } from "@/lib/hooks/use-experts";
 
 interface ChatPageProps {
   params: Promise<{ id: string }>;
@@ -68,7 +78,16 @@ export default function ChatPage({ params }: ChatPageProps) {
   const [project, setProject] = useState<{
     title: string;
     status: string;
+    phase: string;
+    knowledgeCounts: { consensus: number; divergence: number };
+    expertIds: string[];
   } | null>(null);
+  const [dashboardState, setDashboardState] = useState<DiscussionState>(() =>
+    createInitialState([])
+  );
+  const { experts } = useExperts();
+  // 缓存从 API 加载的原始消息，供看板重建使用（避免依赖流式中的 messages state）
+  const apiMessagesRef = useRef<{ role: string; content: string; metadata?: string | null }[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isTyping, setIsTyping] = useState(false);
@@ -90,9 +109,39 @@ export default function ChatPage({ params }: ChatPageProps) {
   const [isPaused, setIsPaused] = useState(false);
   const [pauseRemainingTurns, setPauseRemainingTurns] = useState<number | undefined>(undefined);
   const pausedRef = useRef(false);
+  // 动态专家管理：邀请/移除专家模态框与主持人建议专家
+  const [showExpertPicker, setShowExpertPicker] = useState(false);
+  const [suggestedExpert, setSuggestedExpert] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const endAbortRef = useRef<AbortController | null>(null);
+
+  // 当前项目参与的专家（按 project.expertIds 过滤）
+  const projectExperts = useMemo(
+    () => experts.filter((e) => project?.expertIds.includes(e.id) ?? false),
+    [experts, project?.expertIds]
+  );
+
+  // 将当前发言中的专家标记为已完成，并切换 phase（用于流式结束/暂停时的收尾）
+  const finalizeDashboard = useCallback(
+    (nextPhase: DiscussionState["phase"]) => {
+      setDashboardState((prev) => {
+        if (nextPhase === "completed" && prev.phase === "completed") return prev;
+        const hasSpeaking = prev.activeExperts.some((e) => e.speaking);
+        return {
+          ...prev,
+          phase: nextPhase,
+          completedTurns: hasSpeaking
+            ? prev.completedTurns + 1
+            : prev.completedTurns,
+          activeExperts: prev.activeExperts.map((e) =>
+            e.speaking ? { ...e, speaking: false, spoken: true } : e
+          ),
+        };
+      });
+    },
+    []
+  );
 
   // Toast auto-dismiss
   useEffect(() => {
@@ -116,7 +165,36 @@ export default function ChatPage({ params }: ChatPageProps) {
         }
 
         const projectData = await projectRes.json();
-        setProject({ title: projectData.title, status: projectData.status });
+
+        // 解析项目专家 id 列表与知识库计数
+        let expertIds: string[] = [];
+        try {
+          expertIds = Array.isArray(projectData.expertIds)
+            ? projectData.expertIds
+            : JSON.parse(projectData.expertIds ?? "[]");
+        } catch {
+          expertIds = [];
+        }
+        const knowledgeCounts = projectData.knowledgeCounts ?? {
+          consensus: 0,
+          divergence: 0,
+        };
+        setProject({
+          title: projectData.title,
+          status: projectData.status,
+          phase: projectData.phase ?? "diverge",
+          knowledgeCounts,
+          expertIds,
+        });
+
+        // 缓存原始消息供看板重建
+        apiMessagesRef.current = (projectData.messages ?? []).map(
+          (m: ApiMessage) => ({
+            role: m.role,
+            content: m.content,
+            metadata: m.metadata,
+          })
+        );
 
         // Messages are included in the project response
         if (projectData.messages) {
@@ -137,6 +215,17 @@ export default function ChatPage({ params }: ChatPageProps) {
             }
           }
         }
+
+        // 用当前可用的专家列表重建看板初始状态（自定义专家加载后会由下方 useEffect 再次重建）
+        const initialExperts = experts.filter((e) => expertIds.includes(e.id));
+        setDashboardState(
+          rebuildStateFromMessages(
+            apiMessagesRef.current,
+            initialExperts,
+            knowledgeCounts,
+            projectData.status === "completed"
+          )
+        );
       } catch (e) {
         setLoadError(e instanceof Error ? e.message : "加载数据失败");
       } finally {
@@ -144,7 +233,29 @@ export default function ChatPage({ params }: ChatPageProps) {
       }
     };
     fetchData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // 当项目数据或专家列表变化时重建看板；流式进行中（hosting/discussing/summarizing）保留实时状态。
+  // 已结束项目（status === "completed"）通过 rebuildStateFromMessages 的 isCompleted 参数置为 completed 阶段。
+  useEffect(() => {
+    if (!project) return;
+    setDashboardState((prev) => {
+      if (
+        prev.phase === "hosting" ||
+        prev.phase === "discussing" ||
+        prev.phase === "summarizing"
+      ) {
+        return prev;
+      }
+      return rebuildStateFromMessages(
+        apiMessagesRef.current,
+        projectExperts,
+        project.knowledgeCounts,
+        project.status === "completed"
+      );
+    });
+  }, [projectExperts, project]);
 
   // Handle streaming chunks - append to last message if same type+expert+round, else create new
   const handleStreamChunk = useCallback(
@@ -170,6 +281,12 @@ export default function ChatPage({ params }: ChatPageProps) {
       if (!res.ok) return;
       const data = await res.json();
       if (data.messages) {
+        const raw = data.messages as ApiMessage[];
+        apiMessagesRef.current = raw.map((m) => ({
+          role: m.role,
+          content: m.content,
+          metadata: m.metadata,
+        }));
         setMessages(data.messages.map(normalizeMessage));
       }
     } catch {
@@ -184,24 +301,110 @@ export default function ChatPage({ params }: ChatPageProps) {
         setSearchStatus(null);
         setTypingRole({ role: "host" });
         handleStreamChunk("host", data.content);
+        // 解析主持人输出中的 [SUGGEST_EXPERT:领域描述] 标记，提示用户邀请专家
+        const suggestMatch = data.content.match(/\[SUGGEST_EXPERT:([^\]]+)\]/);
+        if (suggestMatch) {
+          setSuggestedExpert(suggestMatch[1].trim());
+        }
+        // 进入主持人引导阶段，重置本轮看板进度与活跃专家
+        const ids = data.expertIds ?? [];
+        setDashboardState((prev) => ({
+          ...prev,
+          phase: "hosting",
+          currentRound: 0,
+          completedTurns: 0,
+          totalTurns: ids.length > 0 ? MAX_EXPERT_ROUNDS * ids.length : prev.totalTurns,
+          activeExperts: ids.map((eid) => {
+            const def = projectExperts.find((e) => e.id === eid);
+            return {
+              id: eid,
+              name: def?.name ?? eid,
+              avatarColor: def?.avatarColor ?? "emerald",
+              spoken: false,
+              speaking: false,
+            };
+          }),
+        }));
       },
       onExpertStart: (data: { expertId: string; round: number }) => {
         setTypingRole({ role: "expert", expertId: data.expertId, round: data.round });
+        // 进入专家讨论阶段，收尾上一位发言专家并切换当前发言者
+        setDashboardState((prev) => {
+          let { completedTurns, activeExperts } = prev;
+          const currentRound = prev.currentRound;
+          const hadSpeaking = activeExperts.some((e) => e.speaking);
+          if (hadSpeaking) {
+            completedTurns += 1;
+            activeExperts = activeExperts.map((e) =>
+              e.speaking ? { ...e, speaking: false, spoken: true } : e
+            );
+          }
+          const newRound = data.round ?? currentRound;
+          // 轮次递增：新轮次重置该轮发言标记
+          if (newRound > currentRound) {
+            activeExperts = activeExperts.map((e) => ({
+              ...e,
+              spoken: false,
+              speaking: false,
+            }));
+          }
+          activeExperts = activeExperts.map((e) =>
+            e.id === data.expertId ? { ...e, speaking: true } : e
+          );
+          return {
+            ...prev,
+            phase: "discussing",
+            currentRound: newRound,
+            completedTurns,
+            activeExperts,
+          };
+        });
       },
       onExpert: (data: { content: string; expertId: string; round?: number }) => {
         setSearchStatus(null);
         setTypingRole({ role: "expert", expertId: data.expertId, round: data.round });
         handleStreamChunk("expert", data.content, data.expertId, data.round);
+        // 标记当前专家已开始发言
+        setDashboardState((prev) => ({
+          ...prev,
+          phase: "discussing",
+          currentRound: data.round ?? prev.currentRound,
+          activeExperts: prev.activeExperts.map((e) =>
+            e.id === data.expertId ? { ...e, spoken: true, speaking: true } : e
+          ),
+        }));
       },
       onSummary: (data: { content: string }) => {
         setTypingRole({ role: "summary" });
         handleStreamChunk("summary", data.content);
+        // 进入总结阶段，收尾当前发言专家
+        finalizeDashboard("summarizing");
       },
       onPause: (data: { content: string; remainingTurns?: number }) => {
         setTypingRole({ role: "pause" });
         handleStreamChunk("pause", data.content);
         pausedRef.current = true;
         setPauseRemainingTurns(data.remainingTurns);
+        // 进入暂停阶段，收尾当前发言专家并更新总轮次
+        setDashboardState((prev) => {
+          const hasSpeaking = prev.activeExperts.some((e) => e.speaking);
+          const completedTurns = hasSpeaking
+            ? prev.completedTurns + 1
+            : prev.completedTurns;
+          const totalTurns =
+            typeof data.remainingTurns === "number"
+              ? completedTurns + data.remainingTurns
+              : prev.totalTurns;
+          return {
+            ...prev,
+            phase: "paused",
+            completedTurns,
+            totalTurns,
+            activeExperts: prev.activeExperts.map((e) =>
+              e.speaking ? { ...e, speaking: false, spoken: true } : e
+            ),
+          };
+        });
       },
       onToolCall: (data: { expertId: string | null; toolName: string; input: unknown }) => {
         if (data.toolName === "webSearch") {
@@ -220,12 +423,12 @@ export default function ChatPage({ params }: ChatPageProps) {
         reloadMessagesFromDB();
       },
     }),
-    [handleStreamChunk, reloadMessagesFromDB]
+    [handleStreamChunk, reloadMessagesFromDB, projectExperts, finalizeDashboard]
   );
 
-  // Send a message via SSE
+  // Send a message via SSE（支持附带附件）
   const sendMessage = useCallback(
-    async (content: string) => {
+    async (content: string, attachments?: Attachment[]) => {
       setMessages((prev) => [...prev, { id: generateId(), role: "user", content }]);
 
       setTypingRole({ role: "host" });
@@ -242,7 +445,7 @@ export default function ChatPage({ params }: ChatPageProps) {
         const response = await fetchWithConfig(`/api/sessions/${id}/message`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content }),
+          body: JSON.stringify({ content, attachments }),
           signal: controller.signal,
         });
 
@@ -269,16 +472,57 @@ export default function ChatPage({ params }: ChatPageProps) {
         setSearchStatus(null);
         abortRef.current = null;
         if (pausedRef.current) setIsPaused(true);
+        // 流式结束：非暂停态恢复 idle，收尾当前发言专家
+        if (!pausedRef.current) finalizeDashboard("idle");
       }
     },
-    [id, createStreamHandlers, reloadMessagesFromDB]
+    [id, createStreamHandlers, reloadMessagesFromDB, finalizeDashboard]
   );
 
   const handleSend = useCallback(
-    (text: string) => {
-      sendMessage(text);
+    (text: string, attachments?: Attachment[]) => {
+      sendMessage(text, attachments);
     },
     [sendMessage]
+  );
+
+  // 发送用户干预指令：以 / 开头的方向性干预，仅持久化为 intervene 类型消息，
+  // 不触发专家即时回应；指令将在下一轮专家讨论时注入【用户干预指令】段落。
+  const handleIntervene = useCallback(
+    async (directive: string) => {
+      // 前端立即追加用户消息气泡（与后端持久化保持一致）
+      setMessages((prev) => [
+        ...prev,
+        { id: generateId(), role: "user", content: directive },
+      ]);
+      setError(null);
+
+      try {
+        const response = await fetchWithConfig(
+          `/api/sessions/${id}/intervene`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ directive }),
+          }
+        );
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error ?? `请求失败 (${response.status})`);
+        }
+
+        // 持久化成功后从 DB 同步，确保 metadata（intervene 标记）等字段正确
+        await reloadMessagesFromDB();
+        setToast("干预指令已记录，将在下一轮讨论中引导专家方向");
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "干预指令发送失败";
+        setError(msg);
+        setToast(`干预失败: ${msg}`);
+        await reloadMessagesFromDB();
+      }
+    },
+    [id, reloadMessagesFromDB]
   );
 
   const handleStop = useCallback(() => {
@@ -340,9 +584,10 @@ export default function ChatPage({ params }: ChatPageProps) {
         setSearchStatus(null);
         abortRef.current = null;
         if (pausedRef.current) setIsPaused(true);
+        if (!pausedRef.current) finalizeDashboard("idle");
       }
     },
-    [id, createStreamHandlers, reloadMessagesFromDB]
+    [id, createStreamHandlers, reloadMessagesFromDB, finalizeDashboard]
   );
 
   const handleRetry = useCallback(async () => {
@@ -356,6 +601,12 @@ export default function ChatPage({ params }: ChatPageProps) {
       if (res.ok) {
         const data = await res.json();
         if (data.messages) {
+          const raw = data.messages as ApiMessage[];
+          apiMessagesRef.current = raw.map((m) => ({
+            role: m.role,
+            content: m.content,
+            metadata: m.metadata,
+          }));
           const reloaded = data.messages.map(normalizeMessage);
           setMessages(reloaded);
           lastUserMsg = [...reloaded].reverse().find((m) => m.role === "user");
@@ -418,8 +669,9 @@ export default function ChatPage({ params }: ChatPageProps) {
       setIsTyping(false);
       setSearchStatus(null);
       abortRef.current = null;
+      if (!pausedRef.current) finalizeDashboard("idle");
     }
-  }, [id, lastMessage, messages, sendMessage, createStreamHandlers, reloadMessagesFromDB]);
+  }, [id, lastMessage, messages, sendMessage, createStreamHandlers, reloadMessagesFromDB, finalizeDashboard]);
 
   // Edit a user message: truncate subsequent messages, update content, regenerate
   const handleEditMessage = useCallback(
@@ -479,9 +731,10 @@ export default function ChatPage({ params }: ChatPageProps) {
         setIsTyping(false);
         setSearchStatus(null);
         abortRef.current = null;
+        if (!pausedRef.current) finalizeDashboard("idle");
       }
     },
-    [id, createStreamHandlers, reloadMessagesFromDB]
+    [id, messages, createStreamHandlers, reloadMessagesFromDB, finalizeDashboard]
   );
 
   // Trigger manual summary via SSE
@@ -504,7 +757,10 @@ export default function ChatPage({ params }: ChatPageProps) {
       }
 
       await parseSSEStream(response, {
-        onSummary: (data) => handleStreamChunk("summary", data.content),
+        onSummary: (data) => {
+          handleStreamChunk("summary", data.content);
+          setDashboardState((prev) => ({ ...prev, phase: "summarizing" }));
+        },
         onError: (data) => {
           setError(data.message);
           setToast(`总结失败: ${data.message}`);
@@ -521,8 +777,9 @@ export default function ChatPage({ params }: ChatPageProps) {
     } finally {
       setIsTyping(false);
       abortRef.current = null;
+      finalizeDashboard("idle");
     }
-  }, [id, handleStreamChunk]);
+  }, [id, handleStreamChunk, finalizeDashboard]);
 
   // End brainstorm and generate minutes via SSE, then redirect
   const handleEnd = useCallback(async () => {
@@ -584,6 +841,28 @@ export default function ChatPage({ params }: ChatPageProps) {
     endAbortRef.current = null;
     setIsEnding(false);
   }, []);
+
+  // 进入收敛阶段：将讨论从发散切换到收敛
+  const handleEnterConverge = useCallback(async () => {
+    if (!project || isTyping) return;
+    try {
+      const res = await fetchWithConfig(`/api/sessions/${id}/phase`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phase: "converge" }),
+      });
+      if (res.ok) {
+        setProject((prev) => (prev ? { ...prev, phase: "converge" } : prev));
+        setToast("已进入收敛阶段");
+        await reloadMessagesFromDB();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setToast(`操作失败: ${err.error ?? "未知错误"}`);
+      }
+    } catch (e) {
+      setToast(`操作失败: ${e instanceof Error ? e.message : "未知错误"}`);
+    }
+  }, [project, isTyping, id, reloadMessagesFromDB]);
 
   // Test LLM connection
   const handleTestConnection = useCallback(async () => {
@@ -667,13 +946,55 @@ export default function ChatPage({ params }: ChatPageProps) {
             </svg>
           </Link>
           <div className="min-w-0">
-            <h1 className="truncate text-base font-semibold text-gray-900">
-              {project?.title ?? "脑暴"}
-            </h1>
+            <div className="flex items-center gap-2">
+              <h1 className="truncate text-base font-semibold text-gray-900">
+                {project?.title ?? "脑暴"}
+              </h1>
+              {project?.phase && project.phase !== "concluded" && !isCompleted && (
+                <span
+                  className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${
+                    project.phase === "converge"
+                      ? "bg-blue-50 text-blue-600"
+                      : "bg-orange-50 text-orange-600"
+                  }`}
+                >
+                  {project.phase === "converge" ? "收敛" : "发散"}
+                </span>
+              )}
+            </div>
             {isCompleted && (
               <span className="text-xs text-gray-500">脑暴已结束</span>
             )}
           </div>
+        </div>
+
+        {/* 专家头像展示区 + 邀请按钮 */}
+        <div className="flex items-center gap-1.5">
+          {project?.expertIds?.map((eid) => {
+            const expert = experts.find((e) => e.id === eid);
+            if (!expert) return null;
+            const colors = getExpertColors(expert.avatarColor);
+            return (
+              <div
+                key={eid}
+                className={`flex h-7 w-7 items-center justify-center rounded-full ${colors.avatar} text-xs font-semibold text-white`}
+                style={colors.style}
+                title={expert.name}
+              >
+                {expert.name.charAt(0)}
+              </div>
+            );
+          })}
+          {!isCompleted && project && (
+            <button
+              type="button"
+              onClick={() => setShowExpertPicker(true)}
+              className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-dashed border-gray-300 text-gray-400 transition-colors hover:border-blue-400 hover:text-blue-500"
+              title="邀请/管理专家"
+            >
+              +
+            </button>
+          )}
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
@@ -722,17 +1043,60 @@ export default function ChatPage({ params }: ChatPageProps) {
               查看纪要
             </Link>
           ) : (
-            <button
-              type="button"
-              onClick={() => setShowEndConfirm(true)}
-              disabled={isTyping || isEnding}
-              className="rounded-lg border border-red-300 px-3 py-1.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              结束脑暴
-            </button>
+            <>
+              {project?.phase === "diverge" && (
+                <button
+                  type="button"
+                  onClick={handleEnterConverge}
+                  disabled={isTyping || isEnding}
+                  className="rounded-lg border border-orange-300 px-3 py-1.5 text-sm font-medium text-orange-600 transition-colors hover:bg-orange-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  进入收敛
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowEndConfirm(true)}
+                disabled={isTyping || isEnding}
+                className="rounded-lg border border-red-300 px-3 py-1.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                结束脑暴
+              </button>
+            </>
           )}
         </div>
       </header>
+
+      {/* 主持人建议邀请专家提示条 */}
+      {suggestedExpert && !isCompleted && (
+        <div className="shrink-0 border-t border-blue-200 bg-blue-50 px-4 py-2">
+          <div className="mx-auto flex max-w-3xl items-center justify-between gap-2 text-sm text-blue-800">
+            <span>建议邀请「{suggestedExpert}」领域的专家参与讨论</span>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowExpertPicker(true);
+                  setSuggestedExpert(null);
+                }}
+                className="rounded-md bg-blue-500 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-600"
+              >
+                邀请专家
+              </button>
+              <button
+                type="button"
+                onClick={() => setSuggestedExpert(null)}
+                className="text-blue-400 transition-colors hover:text-blue-600"
+              >
+                忽略
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 讨论状态看板 */}
+      <DiscussionDashboard state={dashboardState} />
 
       {/* Chat stream */}
       <ChatStream
@@ -787,9 +1151,10 @@ export default function ChatPage({ params }: ChatPageProps) {
             onSummarize={handleSummarize}
             onStop={handleStop}
             onContinue={handleContinue}
+            onIntervene={handleIntervene}
             isPaused={isPaused}
             disabled={isTyping || isEnding}
-            placeholder="输入你的想法，按 Enter 发送..."
+            placeholder="输入你的想法，按 Enter 发送...（输入 / 可干预讨论方向）"
           />
         </>
       )}
@@ -884,6 +1249,108 @@ export default function ChatPage({ params }: ChatPageProps) {
             >
               停止生成
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* 动态专家管理模态框：邀请/移除专家 */}
+      {showExpertPicker && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="mx-4 max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-6 shadow-xl">
+            <h2 className="mb-4 text-lg font-semibold text-gray-900">
+              邀请 / 管理专家
+            </h2>
+            <p className="mb-3 text-xs text-gray-500">
+              勾选或取消勾选专家以邀请加入或移出当前讨论。仅前 3 轮允许变更，每轮最多一次。
+            </p>
+            <ExpertPicker
+              selectedIds={project?.expertIds ?? []}
+              onChange={async (ids) => {
+                // 找出新增的专家
+                const newId = ids.find(
+                  (id) => !project?.expertIds?.includes(id)
+                );
+                // 找出移除的专家
+                const removedId = project?.expertIds?.find(
+                  (id) => !ids.includes(id)
+                );
+
+                if (newId) {
+                  try {
+                    const res = await fetchWithConfig(
+                      `/api/sessions/${id}/experts`,
+                      {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          action: "add",
+                          expertId: newId,
+                        }),
+                      }
+                    );
+                    if (res.ok) {
+                      const data = await res.json();
+                      setProject((prev) =>
+                        prev
+                          ? { ...prev, expertIds: data.expertIds }
+                          : prev
+                      );
+                      setToast("已邀请专家加入讨论");
+                      setShowExpertPicker(false);
+                      await reloadMessagesFromDB();
+                    } else {
+                      const err = await res.json().catch(() => ({}));
+                      setToast(`邀请失败: ${err.error ?? "未知错误"}`);
+                    }
+                  } catch (e) {
+                    setToast(
+                      `邀请失败: ${e instanceof Error ? e.message : "未知错误"}`
+                    );
+                  }
+                } else if (removedId) {
+                  try {
+                    const res = await fetchWithConfig(
+                      `/api/sessions/${id}/experts`,
+                      {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          action: "remove",
+                          expertId: removedId,
+                        }),
+                      }
+                    );
+                    if (res.ok) {
+                      const data = await res.json();
+                      setProject((prev) =>
+                        prev
+                          ? { ...prev, expertIds: data.expertIds }
+                          : prev
+                      );
+                      setToast("已移除专家");
+                      setShowExpertPicker(false);
+                      await reloadMessagesFromDB();
+                    } else {
+                      const err = await res.json().catch(() => ({}));
+                      setToast(`移除失败: ${err.error ?? "未知错误"}`);
+                    }
+                  } catch (e) {
+                    setToast(
+                      `移除失败: ${e instanceof Error ? e.message : "未知错误"}`
+                    );
+                  }
+                }
+              }}
+            />
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowExpertPicker(false)}
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+              >
+                关闭
+              </button>
+            </div>
           </div>
         </div>
       )}

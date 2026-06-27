@@ -48,6 +48,30 @@ export function ChatStream({
           if (message.role === "summary" || message.role === "pause") {
             return <SummaryCard key={message.id} content={message.content} label={message.role === "pause" ? "中场总结" : undefined} />;
           }
+          if (message.role === "system") {
+            // 系统通知：居中灰色小卡片（如专家邀请/移除通知）
+            return (
+              <div key={message.id} className="flex justify-center py-2">
+                <div className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs text-gray-500">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    className="h-3.5 w-3.5 shrink-0"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                    />
+                  </svg>
+                  <span>{message.content}</span>
+                </div>
+              </div>
+            );
+          }
           return (
             <MessageBubble
               key={message.id}

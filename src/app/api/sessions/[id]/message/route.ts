@@ -12,11 +12,13 @@ export async function POST(
 ) {
   const { id } = await params;
 
-  // 解析请求体
+  // 解析请求体（支持可选的附件列表）
   let content: string;
+  let attachments: { name: string; type: string; text: string }[] | undefined;
   try {
     const body = await request.json();
     content = body.content;
+    attachments = body.attachments;
   } catch {
     return NextResponse.json(
       { error: "无效的请求体" },
@@ -24,8 +26,10 @@ export async function POST(
     );
   }
 
-  // 验证消息内容
-  if (!content || typeof content !== "string" || content.trim().length === 0) {
+  // 验证消息内容（允许空文本但要求有附件，或两者皆有）
+  const hasContent = content && typeof content === "string" && content.trim().length > 0;
+  const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+  if (!hasContent && !hasAttachments) {
     return NextResponse.json(
       { error: "消息内容不能为空" },
       { status: 400 }
@@ -34,7 +38,7 @@ export async function POST(
 
   return createSSEResponse(async (send) => {
     const engine = createEngineFromRequest(request);
-    await engine.handleUserMessage(id, content, {
+    await engine.handleUserMessage(id, hasContent ? content : "", {
       onHost: (chunk, expertIds) => {
         send("host", { content: chunk, expertIds });
       },
@@ -53,6 +57,6 @@ export async function POST(
       onError: (message) => {
         send("error", { message, retryable: true });
       },
-    }, request.signal);
+    }, request.signal, attachments);
   });
 }

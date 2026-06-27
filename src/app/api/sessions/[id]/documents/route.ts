@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { createSSEResponse } from "@/lib/sse";
 import { createEngineFromRequest } from "@/lib/server-config";
-import type { DocumentType } from "@/lib/engine/document-agent";
+import type { DocumentType } from "@/lib/engine/doc-types";
+import { VALID_DOC_TYPES } from "@/lib/engine/doc-types";
 
 /**
  * POST /api/sessions/[id]/documents
- * 生成 PRD 或 SPEC 文档草稿，返回 SSE 流
+ * 生成文档草稿（PRD/SPEC/用户故事地图/技术方案/市场分析报告/行动计划），返回 SSE 流
  */
 export async function POST(
   request: Request,
@@ -27,9 +28,9 @@ export async function POST(
   const { type, content } = body;
 
   // 验证文档类型
-  if (type !== "prd" && type !== "spec") {
+  if (!VALID_DOC_TYPES.includes(type)) {
     return NextResponse.json(
-      { error: "文档类型必须是 prd 或 spec" },
+      { error: "无效的文档类型" },
       { status: 400 }
     );
   }

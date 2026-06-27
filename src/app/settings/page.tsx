@@ -10,12 +10,14 @@ import {
 } from "@/lib/client-config";
 
 export default function SettingsPage() {
-  const [apiKey, setApiKey] = useState("");
-  const [baseURL, setBaseURL] = useState("");
-  const [model, setModel] = useState("");
-  const [maxTokens, setMaxTokens] = useState("");
-  const [temperature, setTemperature] = useState("");
-  const [searchApiKey, setSearchApiKey] = useState("");
+  // 使用 lazy initial state 从 localStorage 读取配置，避免 useEffect 中调用 setState
+  const initialConfig = getLLMConfig();
+  const [apiKey, setApiKey] = useState(initialConfig.apiKey ?? "");
+  const [baseURL, setBaseURL] = useState(initialConfig.baseURL ?? "");
+  const [model, setModel] = useState(initialConfig.model ?? "");
+  const [maxTokens, setMaxTokens] = useState(initialConfig.maxTokens?.toString() ?? "");
+  const [temperature, setTemperature] = useState(initialConfig.temperature?.toString() ?? "");
+  const [searchApiKey, setSearchApiKey] = useState(initialConfig.searchApiKey ?? "");
 
   const [showApiKey, setShowApiKey] = useState(false);
   const [showSearchKey, setShowSearchKey] = useState(false);
@@ -25,17 +27,6 @@ export default function SettingsPage() {
     "idle" | "testing" | "success" | "failed"
   >("idle");
   const [connectionMessage, setConnectionMessage] = useState("");
-
-  // Load saved config on mount
-  useEffect(() => {
-    const config = getLLMConfig();
-    setApiKey(config.apiKey ?? "");
-    setBaseURL(config.baseURL ?? "");
-    setModel(config.model ?? "");
-    setMaxTokens(config.maxTokens?.toString() ?? "");
-    setTemperature(config.temperature?.toString() ?? "");
-    setSearchApiKey(config.searchApiKey ?? "");
-  }, []);
 
   // Toast auto-dismiss
   useEffect(() => {
