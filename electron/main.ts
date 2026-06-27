@@ -3,6 +3,8 @@ import { spawn, exec, type ChildProcessWithoutNullStreams } from "node:child_pro
 import { join } from "node:path";
 import { existsSync, copyFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import http from "node:http";
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const Database = require("better-sqlite3");
 
 const isDev = !app.isPackaged;
 const PORT = 3000;
@@ -53,6 +55,49 @@ function ensureDatabase(templateDbPath: string): void {
     log("已从模板初始化数据库: " + dbPath);
   } else {
     log("警告: 未找到数据库模板: " + templateDbPath);
+  }
+}
+
+/**
+ * 数据库迁移：检测旧版 app.db schema 是否过期，如果过期则备份后用模板替换
+ * 通过检查 Message.seq 列是否存在来判断 schema 版本（v0.2.0 标记）
+ */
+function migrateDatabase(): void {
+  const dbPath = join(app.getPath("userData"), "app.db");
+  if (!existsSync(dbPath)) return;
+
+  try {
+    const db = new Database(dbPath);
+
+    // 检测 Message.seq 列是否存在（v0.2.0 schema 标记）
+    const msgColumns = db.pragma("table_info(Message)") as { name: string }[];
+    const hasSeq = msgColumns.some((c) => c.name === "seq");
+    db.close();
+
+    if (hasSeq) {
+      log("数据库 schema 已是最新版本");
+      return;
+    }
+
+    // 旧版数据库，备份后用模板替换
+    const backupPath = dbPath + ".v011-backup";
+    copyFileSync(dbPath, backupPath);
+    log("已备份旧数据库到: " + backupPath);
+
+    const templatePath = join(
+      process.resourcesPath,
+      "app",
+      "prisma",
+      "app-template.db"
+    );
+    if (existsSync(templatePath)) {
+      copyFileSync(templatePath, dbPath);
+      log("已用模板数据库替换旧库（schema 升级到 v0.2.0）");
+    } else {
+      log("错误: 模板数据库不存在: " + templatePath);
+    }
+  } catch (e) {
+    log("数据库迁移检查失败: " + (e instanceof Error ? e.message : String(e)));
   }
 }
 
@@ -190,6 +235,7 @@ app.whenReady().then(async () => {
     const templatePath = join(process.resourcesPath, "app", "prisma", "app-template.db");
     log("template db path: " + templatePath + ", exists: " + existsSync(templatePath));
     ensureDatabase(templatePath);
+    migrateDatabase();
     log("database url: " + getDatabaseUrl());
 
     await killPort(PORT);
