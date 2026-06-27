@@ -157,20 +157,20 @@ export class BrainstormEngine {
     const history = await this.loadConversationHistory(projectId);
     const contextString = await this.buildContextString(history, projectId, attachments);
 
-    // 4. 主持人引导（使用 holder 避免 TDZ：流式期间 guideResult 尚未赋值）
-    let designatedExpertIds: string[] | undefined;
+    // 4. 主持人引导（使用 holder 对象避免 TDZ：流式期间 guideResult 尚未赋值）
+    const designatedExpertIdsHolder: { current: string[] | undefined } = { current: undefined };
     const guideResult = await this.hostAgent.guide(
       content,
       expertIds,
       history.slice(-MAX_CONTEXT_ROUNDS),
       (chunk) => {
-        callbacks.onHost?.(chunk, designatedExpertIds);
+        callbacks.onHost?.(chunk, designatedExpertIdsHolder.current);
       },
       abortSignal,
       (toolName, input) => callbacks.onToolCall?.(null, toolName, input),
       (project.phase || "diverge") as "diverge" | "converge"
     );
-    designatedExpertIds = guideResult.designatedExpertIds;
+    designatedExpertIdsHolder.current = guideResult.designatedExpertIds;
 
     // 主持人引导成功后才更新轮次计数
     await prisma.project.update({
@@ -442,20 +442,20 @@ export class BrainstormEngine {
     const contextString = await this.buildContextString(history, projectId);
     const expertIds = JSON.parse(project.expertIds) as string[];
 
-    // 5. 主持人引导（不递增轮次，这是编辑不是新轮次）
-    let designatedExpertIds: string[] | undefined;
+    // 5. 主持人引导（使用 holder 对象避免 TDZ：流式期间 guideResult 尚未赋值）
+    const designatedExpertIdsHolder: { current: string[] | undefined } = { current: undefined };
     const guideResult = await this.hostAgent.guide(
       newContent,
       expertIds,
       history.slice(-MAX_CONTEXT_ROUNDS),
       (chunk) => {
-        callbacks.onHost?.(chunk, designatedExpertIds);
+        callbacks.onHost?.(chunk, designatedExpertIdsHolder.current);
       },
       abortSignal,
       (toolName, input) => callbacks.onToolCall?.(null, toolName, input),
       (project.phase || "diverge") as "diverge" | "converge"
     );
-    designatedExpertIds = guideResult.designatedExpertIds;
+    designatedExpertIdsHolder.current = guideResult.designatedExpertIds;
 
     // 持久化主持人消息
     await prisma.message.create({
