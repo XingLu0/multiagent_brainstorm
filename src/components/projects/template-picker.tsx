@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
+import TemplateManager from "@/components/settings/template-manager";
 
 interface Template {
   id: string;
@@ -19,8 +20,10 @@ export function TemplatePicker({ onSelect }: TemplatePickerProps) {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [showManager, setShowManager] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  useEffect(() => {
+  const loadTemplates = useCallback(() => {
     fetch("/api/v1/templates")
       .then((res) => res.json())
       .then((data) => {
@@ -29,6 +32,10 @@ export function TemplatePicker({ onSelect }: TemplatePickerProps) {
       })
       .catch(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    loadTemplates();
+  }, [loadTemplates, refreshKey]);
 
   const handleSelect = (template: Template | null) => {
     if (template === null) {
@@ -41,6 +48,10 @@ export function TemplatePicker({ onSelect }: TemplatePickerProps) {
         expertIds: JSON.parse(template.expertIds),
       });
     }
+  };
+
+  const handleManagerChanged = () => {
+    setRefreshKey((k) => k + 1);
   };
 
   if (loading) {
@@ -58,9 +69,18 @@ export function TemplatePicker({ onSelect }: TemplatePickerProps) {
 
   return (
     <div>
-      <label className="mb-2 block text-sm font-medium text-gray-700">
-        从模板开始（可选）
-      </label>
+      <div className="mb-2 flex items-center justify-between">
+        <label className="block text-sm font-medium text-gray-700">
+          从模板开始（可选）
+        </label>
+        <button
+          type="button"
+          onClick={() => setShowManager(!showManager)}
+          className="text-xs text-blue-500 hover:text-blue-600"
+        >
+          {showManager ? "收起管理" : "管理模板"}
+        </button>
+      </div>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         {/* 空白模板 */}
         <button
@@ -90,9 +110,13 @@ export function TemplatePicker({ onSelect }: TemplatePickerProps) {
           >
             <div className="flex items-center gap-1.5">
               <span className="text-sm font-medium text-gray-700">{tpl.name}</span>
-              {tpl.isBuiltin && (
+              {tpl.isBuiltin ? (
                 <span className="rounded bg-gray-100 px-1 py-0.5 text-[10px] text-gray-500">
                   内置
+                </span>
+              ) : (
+                <span className="rounded bg-green-100 px-1 py-0.5 text-[10px] text-green-600">
+                  自定义
                 </span>
               )}
             </div>
@@ -105,6 +129,13 @@ export function TemplatePicker({ onSelect }: TemplatePickerProps) {
           </button>
         ))}
       </div>
+
+      {/* 模板管理面板 */}
+      {showManager && (
+        <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-4">
+          <TemplateManager onChanged={handleManagerChanged} />
+        </div>
+      )}
     </div>
   );
 }

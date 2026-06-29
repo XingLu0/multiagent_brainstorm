@@ -44,7 +44,27 @@ if (fs.existsSync(standalonePkg)) {
   fs.rmSync(standalonePkg, { force: true });
 }
 
-/* 4. @electron/rebuild：将 better-sqlite3 重编为 Electron ABI（Windows 带 win_delay_load_hook） */
+/* 4. 生成模板数据库（含 schema + 内置种子数据），随包发布供首次启动复制
+ *     必须在 electron-rebuild 之前执行，因为 seed.ts 使用系统 Node.js 的 ABI，
+ *     而 electron-rebuild 会将 better-sqlite3 重编译为 Electron ABI */
+log("生成数据库模板 prisma/app-template.db ...");
+const templateDb = path.join(root, "prisma", "app-template.db");
+if (fs.existsSync(templateDb)) fs.rmSync(templateDb, { force: true });
+execSync('npx prisma db push --url="file:./prisma/app-template.db"', {
+  cwd: root,
+  stdio: "inherit",
+});
+if (!fs.existsSync(templateDb)) die("数据库模板生成失败: " + templateDb);
+
+/* 4.1 对模板库执行 seed，填充内置专家定义和项目模板 */
+log("对模板库执行 seed（内置专家 + 项目模板）...");
+execSync('npx tsx prisma/seed.ts', {
+  cwd: root,
+  stdio: "inherit",
+  env: { ...process.env, DATABASE_URL: "file:./prisma/app-template.db" },
+});
+
+/* 5. @electron/rebuild：将 better-sqlite3 重编为 Electron ABI（Windows 带 win_delay_load_hook） */
 log("运行 @electron/rebuild（better-sqlite3）...");
 const bin =
   path.join(root, "node_modules", ".bin", "electron-rebuild") +
@@ -61,7 +81,7 @@ if (r.status !== 0) {
   );
 }
 
-/* 5. 用 Electron-ABI 的 .node 覆盖 standalone 内追踪进来的 Node-ABI 版本 */
+/* 6. 用 Electron-ABI 的 .node 覆盖 standalone 内追踪进来的 Node-ABI 版本 */
 const srcNode = path.join(
   root,
   "node_modules",
@@ -82,24 +102,6 @@ if (!fs.existsSync(srcNode)) die("未找到重编后的 better_sqlite3.node: " +
 fs.mkdirSync(path.dirname(dstNode), { recursive: true });
 fs.copyFileSync(srcNode, dstNode);
 log("已用 Electron-ABI 覆盖 standalone 内 better_sqlite3.node");
-
-/* 6. 生成模板数据库（含 schema + 内置种子数据），随包发布供首次启动复制 */
-log("生成数据库模板 prisma/app-template.db ...");
-const templateDb = path.join(root, "prisma", "app-template.db");
-if (fs.existsSync(templateDb)) fs.rmSync(templateDb, { force: true });
-execSync('npx prisma db push --url="file:./prisma/app-template.db"', {
-  cwd: root,
-  stdio: "inherit",
-});
-if (!fs.existsSync(templateDb)) die("数据库模板生成失败: " + templateDb);
-
-/* 6.1 对模板库执行 seed，填充内置专家定义和项目模板 */
-log("对模板库执行 seed（内置专家 + 项目模板）...");
-execSync('npx tsx prisma/seed.ts', {
-  cwd: root,
-  stdio: "inherit",
-  env: { ...process.env, DATABASE_URL: "file:./prisma/app-template.db" },
-});
 
 /* 7. 将模板数据库复制到 standalone 内，随 standalone 一起打包 */
 const standalonePrismaDir = path.join(standaloneDir, "prisma");

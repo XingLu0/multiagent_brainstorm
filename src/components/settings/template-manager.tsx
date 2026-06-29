@@ -36,7 +36,7 @@ const EMPTY_FORM: TemplateFormData = {
   phase: "diverge",
 };
 
-export default function TemplateManager() {
+export default function TemplateManager({ onChanged }: { onChanged?: () => void }) {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [experts, setExperts] = useState<Expert[]>([]);
   const [loading, setLoading] = useState(true);
@@ -120,6 +120,7 @@ export default function TemplateManager() {
         return;
       }
       showToast("模板已删除");
+      onChanged?.();
       await loadData();
     } catch {
       setError("删除失败");
@@ -159,6 +160,7 @@ export default function TemplateManager() {
       }
 
       showToast(editingId ? "模板已更新" : "模板已创建");
+      onChanged?.();
       setShowForm(false);
       setFormData(EMPTY_FORM);
       setEditingId(null);
