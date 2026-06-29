@@ -8,6 +8,7 @@ import {
   fetchWithConfig,
   type ClientLLMConfig,
 } from "@/lib/client-config";
+import TemplateManager from "@/components/settings/template-manager";
 
 export default function SettingsPage() {
   // 使用 lazy initial state 从 localStorage 读取配置，避免 useEffect 中调用 setState
@@ -455,6 +456,15 @@ export default function SettingsPage() {
             </button>
           </div>
         </form>
+      </div>
+
+      {/* 项目模板管理 */}
+      <div className="mx-auto max-w-2xl px-4 py-8 border-t border-gray-200 mt-8">
+        <h2 className="mb-1 text-xl font-bold text-gray-900">项目模板管理</h2>
+        <p className="mb-4 text-sm text-gray-500">
+          管理内置和自定义项目模板，新建脑暴时可快速选择
+        </p>
+        <TemplateManager />
       </div>
 
       {/* LLM 调用统计 */}

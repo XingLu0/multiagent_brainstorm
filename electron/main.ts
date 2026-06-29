@@ -60,7 +60,7 @@ function ensureDatabase(templateDbPath: string): void {
 
 /**
  * 数据库迁移：检测旧版 app.db schema 是否过期，如果过期则备份后用模板替换
- * 通过检查 Message.seq 列是否存在来判断 schema 版本（v0.2.0 标记）
+ * 检查多个 schema 版本标记列：Message.seq (v0.2.0)、Project.currentSeq (v1.0.0)
  */
 function migrateDatabase(): void {
   const dbPath = join(app.getPath("userData"), "app.db");
@@ -72,17 +72,23 @@ function migrateDatabase(): void {
     // 检测 Message.seq 列是否存在（v0.2.0 schema 标记）
     const msgColumns = db.pragma("table_info(Message)") as { name: string }[];
     const hasSeq = msgColumns.some((c) => c.name === "seq");
+
+    // 检测 Project.currentSeq 列是否存在（v1.0.0 schema 标记）
+    const projectColumns = db.pragma("table_info(Project)") as { name: string }[];
+    const hasCurrentSeq = projectColumns.some((c) => c.name === "currentSeq");
+
     db.close();
 
-    if (hasSeq) {
+    if (hasSeq && hasCurrentSeq) {
       log("数据库 schema 已是最新版本");
       return;
     }
 
     // 旧版数据库，备份后用模板替换
-    const backupPath = dbPath + ".v011-backup";
+    const backupPath = dbPath + ".v1-backup";
     copyFileSync(dbPath, backupPath);
     log("已备份旧数据库到: " + backupPath);
+    log(`schema 标记: Message.seq=${hasSeq}, Project.currentSeq=${hasCurrentSeq}`);
 
     const templatePath = join(
       process.resourcesPath,
@@ -92,7 +98,7 @@ function migrateDatabase(): void {
     );
     if (existsSync(templatePath)) {
       copyFileSync(templatePath, dbPath);
-      log("已用模板数据库替换旧库（schema 升级到 v0.2.0）");
+      log("已用模板数据库替换旧库（schema 升级到 v1.0.0）");
     } else {
       log("错误: 模板数据库不存在: " + templatePath);
     }
