@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState, useEffect, useCallback } from "react";
 import { EXPERTS, type ExpertDefinition } from "@/lib/experts/types";
@@ -15,7 +15,7 @@ function ensureInflight() {
   if (!cache && !inflight) {
     inflight = (async () => {
       try {
-        const res = await fetch("/api/experts");
+        const res = await fetch("/api/v1/experts");
         if (res.ok) {
           cache = (await res.json()) as ExpertDefinition[];
           return cache;
@@ -47,7 +47,7 @@ export function useExperts() {
     inflight = null;
     setLoading(true);
     try {
-      const res = await fetch("/api/experts");
+      const res = await fetch("/api/v1/experts");
       if (res.ok) {
         const data = (await res.json()) as ExpertDefinition[];
         cache = data;

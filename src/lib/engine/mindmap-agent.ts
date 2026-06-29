@@ -1,5 +1,5 @@
 import { streamText, type LanguageModel } from "ai";
-import { consumeStream } from "./host-agent";
+import { consumeStreamWithRetry, getModelId } from "./host-agent";
 import { DEFAULT_CALL_SETTINGS } from "@/lib/llm";
 
 const MINDMAP_SYSTEM_PROMPT = `你是一个思维导图生成助手。将会议纪要转化为 Markdown 格式的思维导图。
@@ -28,9 +28,10 @@ export class MindmapAgent {
   async generateMindmap(
     content: string,
     onChunk: (chunk: string) => void,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    projectId?: string
   ): Promise<string> {
-    const result = streamText({
+    return consumeStreamWithRetry(() => streamText({
       model: this.model,
       system: MINDMAP_SYSTEM_PROMPT,
       prompt: `以下是会议纪要，请生成思维导图：\n\n${content}`,
@@ -41,7 +42,6 @@ export class MindmapAgent {
       onError({ error }) {
         console.error("[LLM Error - MindmapAgent.generateMindmap]", error);
       },
-    });
-    return consumeStream(result, onChunk);
+    }), onChunk, undefined, undefined, { model: getModelId(this.model), projectId });
   }
 }

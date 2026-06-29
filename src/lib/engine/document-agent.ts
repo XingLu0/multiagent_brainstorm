@@ -6,7 +6,7 @@ import { USER_STORY_SYSTEM_PROMPT, buildUserStoryUserPrompt } from "./prompts/us
 import { TECH_PLAN_SYSTEM_PROMPT, buildTechPlanUserPrompt } from "./prompts/tech-plan";
 import { MARKET_ANALYSIS_SYSTEM_PROMPT, buildMarketAnalysisUserPrompt } from "./prompts/market-analysis";
 import { ACTION_PLAN_SYSTEM_PROMPT, buildActionPlanUserPrompt } from "./prompts/action-plan";
-import { consumeStream } from "./host-agent";
+import { consumeStreamWithRetry, getModelId } from "./host-agent";
 import { DEFAULT_CALL_SETTINGS } from "@/lib/llm";
 import type { DocumentType } from "./doc-types";
 
@@ -49,12 +49,13 @@ export class DocumentAgent {
     docType: DocumentType,
     content: string,
     onChunk: (chunk: string) => void,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    projectId?: string
   ): Promise<string> {
     const { system: systemPrompt, user: buildUserPrompt } = DOC_PROMPTS[docType];
     const userPrompt = buildUserPrompt(content);
 
-    const result = streamText({
+    return consumeStreamWithRetry(() => streamText({
       model: this.model,
       system: systemPrompt,
       prompt: userPrompt,
@@ -68,8 +69,6 @@ export class DocumentAgent {
       onAbort() {
         console.log("[DocumentAgent.generate aborted]");
       },
-    });
-
-    return consumeStream(result, onChunk);
+    }), onChunk, undefined, undefined, { model: getModelId(this.model), projectId });
   }
 }

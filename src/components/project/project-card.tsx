@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import React, { useState } from "react";
 import Link from "next/link";
@@ -51,7 +51,7 @@ export function ProjectCard({ project }: ProjectCardProps) {
     e.stopPropagation();
     setDeleting(true);
     try {
-      const res = await fetch(`/api/projects/${project.id}`, {
+      const res = await fetch(`/api/v1/projects/${project.id}`, {
         method: "DELETE",
       });
       if (res.ok) {

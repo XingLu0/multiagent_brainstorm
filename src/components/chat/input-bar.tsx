@@ -10,10 +10,12 @@ interface InputBarProps {
   onSend: (text: string, attachments?: Attachment[]) => void;
   onSummarize: () => void;
   onStop?: () => void;
+  onSoftStop?: () => void;
   onContinue?: (text: string) => void;
   /** 用户干预指令回调：以 / 开头的消息走干预通道，仅持久化不触发专家即时回应 */
   onIntervene?: (directive: string) => void;
   isPaused?: boolean;
+  isSoftStopping?: boolean;
   disabled: boolean;
   placeholder?: string;
 }
@@ -30,7 +32,7 @@ const ACCEPTED_FILE_TYPES = ".txt,.md,.csv,.json,.log";
  * 支持附件上传：点击回形针按钮选择文本文件，已选文件以 chip 形式展示，
  * 发送时附带解析后的附件内容。
  */
-export function InputBar({ onSend, onSummarize, onStop, onContinue, onIntervene, isPaused, disabled, placeholder }: InputBarProps) {
+export function InputBar({ onSend, onSummarize, onStop, onSoftStop, onContinue, onIntervene, isPaused, isSoftStopping, disabled, placeholder }: InputBarProps) {
   const [text, setText] = useState("");
   // 已选附件列表（内部管理，发送后清空）
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -266,7 +268,23 @@ export function InputBar({ onSend, onSummarize, onStop, onContinue, onIntervene,
             rows={1}
             className="max-h-[120px] min-h-[40px] flex-1 resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none transition-colors focus:border-blue-500 focus:ring-1 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
           />
-          {disabled && onStop ? (
+          {disabled && isSoftStopping && onStop ? (
+            <button
+              type="button"
+              onClick={onStop}
+              className="shrink-0 rounded-lg border border-red-300 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50"
+            >
+              强制停止
+            </button>
+          ) : disabled && !isSoftStopping && onSoftStop ? (
+            <button
+              type="button"
+              onClick={onSoftStop}
+              className="shrink-0 rounded-lg border border-amber-300 px-4 py-2 text-sm font-medium text-amber-700 transition-colors hover:bg-amber-50"
+            >
+              软停止
+            </button>
+          ) : disabled && onStop ? (
             <button
               type="button"
               onClick={onStop}

@@ -6,6 +6,22 @@ import { buildSummarySystemPrompt, buildSummaryUserPrompt } from "./prompts/summ
 import { buildMinutesSystemPrompt, buildMinutesUserPrompt } from "./prompts/minutes";
 import { buildPauseSummarySystemPrompt, buildPauseSummaryUserPrompt } from "./prompts/pause";
 import { DEFAULT_CALL_SETTINGS } from "@/lib/llm";
+import { logLLMCall } from "@/lib/llm-logger";
+
+/** LLM 调用日志上下文（可选，传入后自动记录调用日志） */
+export interface LLMLogContext {
+  model: string;
+  projectId?: string;
+}
+
+/**
+ * 从 LanguageModel 获取模型 ID。
+ * AI SDK v6 的 LanguageModel 是联合类型（string | LanguageModelV3 | LanguageModelV2），
+ * 需用 typeof 缩窄后安全访问 modelId。
+ */
+export function getModelId(model: LanguageModel): string {
+  return typeof model === "string" ? model : model.modelId;
+}
 
 function getCurrentDateString(): string {
   return new Date().toLocaleString("zh-CN", { timeZone: "Asia/Hong_Kong" });
@@ -26,12 +42,18 @@ export interface EngineCallbacks {
   onError?: (message: string) => void;
   onToolCall?: (expertId: string | null, toolName: string, input: unknown) => void;
   onPause?: (chunk: string, remainingTurns?: number) => void;
+  /** 软停止触发：当前专家说完后不再继续下一轮 */
+  onSoftStop?: () => void;
+  /** 软停止完成：当前专家已说完，讨论结束 */
+  onSoftStopComplete?: () => void;
 }
 
 /**
  * 消费 streamText 的 fullStream，捕获错误并检查空响应。
  * AI SDK v6 的 streamText 会抑制错误，textStream 不抛异常，
  * 必须使用 fullStream 才能捕获 error 事件。
+ *
+ * @param logContext 可选，传入后自动记录 LLM 调用日志到数据库
  */
 export async function consumeStream(
   result: {
@@ -43,12 +65,19 @@ export async function consumeStream(
       toolCallId?: string;
       input?: unknown;
       output?: unknown;
-    }>
+    }>;
+    usage?: PromiseLike<{
+      promptTokens?: number;
+      completionTokens?: number;
+      totalTokens?: number;
+    }>;
   },
   onChunk: (chunk: string) => void,
   onToolCall?: (toolName: string, input: unknown) => void,
-  onToolResult?: (toolName: string, input: unknown, output: unknown) => void
+  onToolResult?: (toolName: string, input: unknown, output: unknown) => void,
+  logContext?: LLMLogContext
 ): Promise<string> {
+  const startTime = logContext ? performance.now() : 0;
   let fullText = "";
   let streamError: Error | null = null;
 
@@ -77,15 +106,82 @@ export async function consumeStream(
   }
 
   if (streamError) {
+    if (logContext) {
+      await logLLMCall({
+        model: logContext.model,
+        projectId: logContext.projectId,
+        durationMs: Math.round(performance.now() - startTime),
+        success: false,
+        errorMessage: streamError.message,
+      });
+    }
     throw new Error(`AI模型调用失败: ${streamError.message}`);
   }
   if (!fullText.trim()) {
+    if (logContext) {
+      await logLLMCall({
+        model: logContext.model,
+        projectId: logContext.projectId,
+        durationMs: Math.round(performance.now() - startTime),
+        success: false,
+        errorMessage: "空响应",
+      });
+    }
     throw new Error(
       "AI模型返回了空响应，请检查API配置和模型名称是否正确。可点击「测试连接」按钮验证。"
     );
   }
 
+  // 成功时记录
+  if (logContext) {
+    let inputTokens: number | undefined;
+    let outputTokens: number | undefined;
+    if (result.usage) {
+      try {
+        const usage = await result.usage;
+        inputTokens = usage.promptTokens;
+        outputTokens = usage.completionTokens;
+      } catch {
+        // 忽略 usage 获取失败
+      }
+    }
+    await logLLMCall({
+      model: logContext.model,
+      projectId: logContext.projectId,
+      durationMs: Math.round(performance.now() - startTime),
+      success: true,
+      inputTokens,
+      outputTokens,
+    });
+  }
+
   return fullText;
+}
+
+/**
+ * DEF-07: 包裹 consumeStream，空响应时自动重试 1 次。
+ * streamFactory 用于重新发起 streamText 调用。
+ */
+export async function consumeStreamWithRetry(
+  streamFactory: () => Parameters<typeof consumeStream>[0],
+  onChunk: (chunk: string) => void,
+  onToolCall?: (toolName: string, input: unknown) => void,
+  onToolResult?: (toolName: string, input: unknown, output: unknown) => void,
+  logContext?: LLMLogContext
+): Promise<string> {
+  const maxRetries = 1;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await consumeStream(streamFactory(), onChunk, onToolCall, onToolResult, logContext);
+    } catch (error) {
+      if (attempt < maxRetries && error instanceof Error && error.message.includes("空响应")) {
+        console.warn(`[DEF-07] LLM 返回空响应，正在重试 (${attempt + 1}/${maxRetries})...`);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error("unreachable");
 }
 
 export class HostAgent {
@@ -106,7 +202,8 @@ export class HostAgent {
     onChunk: (chunk: string) => void,
     abortSignal?: AbortSignal,
     onToolCall?: (toolName: string, input: unknown) => void,
-    phase: "diverge" | "converge" = "diverge"
+    phase: "diverge" | "converge" = "diverge",
+    projectId?: string
   ): Promise<HostGuideResult> {
     const experts = await getExpertsByIds(expertIds);
     const currentDate = getCurrentDateString();
@@ -119,7 +216,7 @@ export class HostAgent {
       { role: "user" as const, content: buildHostUserPrompt(userMessage, experts) },
     ];
 
-    const result = streamText({
+    const fullText = await consumeStreamWithRetry(() => streamText({
       model: this.model,
       messages,
       maxOutputTokens: this.llmConfig.maxTokens,
@@ -134,9 +231,7 @@ export class HostAgent {
       onAbort() {
         console.log("[HostAgent.guide aborted]");
       },
-    });
-
-    const fullText = await consumeStream(result, onChunk, onToolCall);
+    }), onChunk, onToolCall, undefined, projectId ? { model: getModelId(this.model), projectId } : undefined);
 
     // 解析指定的专家ID（支持多专家 [EXPERTS:id1,id2] 和单专家 [EXPERT:id]）
     const multiMatch = fullText.match(/\[EXPERTS:([\w,]+)\]/);
@@ -162,10 +257,11 @@ export class HostAgent {
   async generateSummary(
     conversationHistory: string,
     onChunk: (chunk: string) => void,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    projectId?: string
   ): Promise<string> {
     const currentDate = getCurrentDateString();
-    const result = streamText({
+    return consumeStreamWithRetry(() => streamText({
       model: this.model,
       system: buildSummarySystemPrompt(currentDate),
       prompt: buildSummaryUserPrompt(conversationHistory),
@@ -176,9 +272,7 @@ export class HostAgent {
       onError({ error }) {
         console.error("[LLM Error - HostAgent.generateSummary]", error);
       },
-    });
-
-    return consumeStream(result, onChunk);
+    }), onChunk, undefined, undefined, projectId ? { model: getModelId(this.model), projectId } : undefined);
   }
 
   /**
@@ -188,10 +282,11 @@ export class HostAgent {
   async generateMidDiscussionSummary(
     conversationContext: string,
     onChunk: (chunk: string) => void,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    projectId?: string
   ): Promise<string> {
     const currentDate = getCurrentDateString();
-    const result = streamText({
+    return consumeStreamWithRetry(() => streamText({
       model: this.model,
       system: buildPauseSummarySystemPrompt(currentDate),
       prompt: buildPauseSummaryUserPrompt(conversationContext),
@@ -202,9 +297,7 @@ export class HostAgent {
       onError({ error }) {
         console.error("[LLM Error - HostAgent.generateMidDiscussionSummary]", error);
       },
-    });
-
-    return consumeStream(result, onChunk);
+    }), onChunk, undefined, undefined, projectId ? { model: getModelId(this.model), projectId } : undefined);
   }
 
   /**
@@ -214,10 +307,11 @@ export class HostAgent {
     projectTitle: string,
     conversationHistory: string,
     onChunk: (chunk: string) => void,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    projectId?: string
   ): Promise<string> {
     const currentDate = getCurrentDateString();
-    const result = streamText({
+    return consumeStreamWithRetry(() => streamText({
       model: this.model,
       system: buildMinutesSystemPrompt(currentDate),
       prompt: buildMinutesUserPrompt(projectTitle, conversationHistory),
@@ -228,8 +322,6 @@ export class HostAgent {
       onError({ error }) {
         console.error("[LLM Error - HostAgent.generateMinutes]", error);
       },
-    });
-
-    return consumeStream(result, onChunk);
+    }), onChunk, undefined, undefined, projectId ? { model: getModelId(this.model), projectId } : undefined);
   }
 }

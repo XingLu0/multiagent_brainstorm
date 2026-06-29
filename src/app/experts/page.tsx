@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import React, { useState } from "react";
 import Link from "next/link";
@@ -62,8 +62,8 @@ export default function ExpertsPage() {
     setSaving(true);
     try {
       const url = editTarget
-        ? `/api/experts/${editTarget.id}`
-        : "/api/experts";
+        ? `/api/v1/experts/${editTarget.id}`
+        : "/api/v1/experts";
       const method = editTarget ? "PUT" : "POST";
       const res = await fetch(url, {
         method,
@@ -89,7 +89,7 @@ export default function ExpertsPage() {
   const handleDelete = async (id: string, name: string) => {
     if (!confirm(`确定删除角色「${name}」？`)) return;
     try {
-      const res = await fetch(`/api/experts/${id}`, { method: "DELETE" });
+      const res = await fetch(`/api/v1/experts/${id}`, { method: "DELETE" });
       if (res.ok) {
         await refresh();
       } else {

@@ -1,3 +1,8 @@
+/**
+ * BrainstormEngine — 脑暴引擎
+ * 采用 Strangler Fig 模式，职责委托给独立模块。
+ */
+
 import { prisma } from "@/lib/prisma";
 import { getExpertById } from "@/lib/experts/definitions";
 import { HostAgent, type EngineCallbacks, type HostGuideResult } from "./host-agent";
@@ -5,113 +10,59 @@ import { ExpertAgent } from "./expert-agent";
 import { DocumentAgent, type DocumentType } from "./document-agent";
 import { MindmapAgent } from "./mindmap-agent";
 import { createEngineTools } from "./tools";
-import { queryKnowledge, extractAndSaveKnowledge } from "./knowledge-base";
-import type { LanguageModel } from "ai";
+import type { LanguageModel, EmbeddingModel } from "ai";
 
-const MAX_CONTEXT_ROUNDS = 20;
-const AUTO_SUMMARY_INTERVAL = 4;
-const MAX_EXPERT_ROUNDS = 5;
-const PAUSE_AFTER_EXPERT_TURNS = 5;
+import { MAX_CONTEXT_ROUNDS } from "./constants";
+import {
+  getNextSeq,
+  persistMessage,
+  loadConversationHistory,
+  consumeUnconsumedInterventions,
+  buildContextString,
+  type MessageAttachment,
+} from "./conversation-manager";
+import { extractKnowledgeForRound } from "./knowledge-manager";
+import { getKnowledgeCounts } from "./knowledge-base";
+import { shouldAutoSummarize } from "./expert-scheduler";
+import { DocumentManager } from "./document-manager";
+import {
+  createDiscussionActor,
+  getCurrentExpertId,
+  getCurrentRound,
+  isLastExpert,
+} from "./discussion-machine";
+import { registerDiscussionActor, unregisterDiscussionActor } from "./soft-stop-registry";
 
-interface ConversationMessage {
-  role: string;
-  content: string;
-}
-
-/** 用户上传的附件（前端解析后的文件内容） */
-export interface MessageAttachment {
-  name: string;
-  type: string;
-  text: string;
-}
+export type { MessageAttachment };
 
 export class BrainstormEngine {
   private model: LanguageModel;
   private hostAgent: HostAgent;
   private expertAgent: ExpertAgent;
-  private documentAgent: DocumentAgent;
-  private mindmapAgent: MindmapAgent;
+  private documentManager: DocumentManager;
+  /** P2-1: 记录每个项目最近动态总结的轮次，防止与固定总结冲突 */
+  private lastDynamicSummaryTurn = new Map<string, number>();
+  /** P2-2: 可选的 embedding 模型，用于语义检索 */
+  private embeddingModel?: EmbeddingModel;
 
   constructor(
     model: LanguageModel,
     llmConfig: { maxTokens: number; temperature: number },
-    searchApiKey: string
+    searchApiKey: string,
+    embeddingModel?: EmbeddingModel
   ) {
     this.model = model;
+    this.embeddingModel = embeddingModel;
     const tools = createEngineTools({ searchApiKey });
     this.hostAgent = new HostAgent(model, llmConfig, tools);
     this.expertAgent = new ExpertAgent(model, llmConfig, tools);
-    this.documentAgent = new DocumentAgent(model, llmConfig);
-    this.mindmapAgent = new MindmapAgent(model);
+    const documentAgent = new DocumentAgent(model, llmConfig);
+    const mindmapAgent = new MindmapAgent(model);
+    this.documentManager = new DocumentManager(this.hostAgent, documentAgent, mindmapAgent, model);
   }
 
   /**
-   * 计算项目下一条消息的 seq 值（SQLite 不支持非主键 autoincrement）
-   */
-  private async getNextSeq(projectId: string): Promise<number> {
-    const result = await prisma.message.aggregate({
-      where: { projectId },
-      _max: { seq: true },
-    });
-    return (result._max.seq ?? 0) + 1;
-  }
-
-  /**
-   * 读取并消费未使用的用户干预指令。
-   *
-   * 扫描项目中所有 role=user 的消息，解析 metadata，筛选出
-   * type="intervene" 且尚未被消费（consumed !== true）的干预指令。
-   * 读取后立即将其 metadata 标记为 consumed=true（持久化），
-   * 确保每条干预指令仅在一个专家讨论轮次中被强调注入。
-   *
-   * @returns 未消费的干预指令原文列表（按 seq 升序）
-   */
-  private async consumeUnconsumedInterventions(
-    projectId: string
-  ): Promise<string[]> {
-    const messages = await prisma.message.findMany({
-      where: { projectId, role: "user" },
-      orderBy: { seq: "asc" },
-      select: { id: true, content: true, metadata: true },
-    });
-
-    const directives: string[] = [];
-    const toMark: { id: string; metadata: string }[] = [];
-
-    for (const m of messages) {
-      if (!m.metadata) continue;
-      try {
-        const meta = JSON.parse(m.metadata) as {
-          type?: string;
-          consumed?: boolean;
-        };
-        if (meta.type === "intervene" && meta.consumed !== true) {
-          directives.push(m.content);
-          toMark.push({
-            id: m.id,
-            metadata: JSON.stringify({ ...meta, consumed: true }),
-          });
-        }
-      } catch {
-        // 元数据解析失败，跳过该条消息
-      }
-    }
-
-    // 标记为已消费，避免重复强调
-    for (const item of toMark) {
-      await prisma.message.update({
-        where: { id: item.id },
-        data: { metadata: item.metadata },
-      });
-    }
-
-    return directives;
-  }
-
-  /**
-   * 处理用户消息：持久化 → 检查自动总结 → 主持人引导 → 专家轮次对话 → 持久化
-   *
-   * @param attachments 用户上传的附件列表（前端解析后的文本内容），可选
+   * 处理用户消息：持久化 → 检查自动总结 → 主持人引导 → 专家轮次对话
    */
   async handleUserMessage(
     projectId: string,
@@ -120,370 +71,178 @@ export class BrainstormEngine {
     abortSignal?: AbortSignal,
     attachments?: MessageAttachment[]
   ): Promise<void> {
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-    });
+    const project = await prisma.project.findUnique({ where: { id: projectId } });
     if (!project) throw new Error("项目不存在");
-    if (project.status !== "active")
-      throw new Error("该项目已结束，无法继续对话");
+    if (project.status !== "active") throw new Error("该项目已结束，无法继续对话");
 
     const expertIds = JSON.parse(project.expertIds) as string[];
 
-    // 1. 持久化用户消息（附件摘要写入 metadata）
-    const userMetadata =
-      attachments && attachments.length > 0
-        ? JSON.stringify({
-            attachments: attachments.map((a) => ({
-              name: a.name,
-              type: a.type,
-              length: a.text.length,
-            })),
-          })
-        : undefined;
-    await prisma.message.create({
-      data: {
-        projectId,
-        role: "user",
-        content,
-        metadata: userMetadata,
-        seq: await this.getNextSeq(projectId),
-      },
-    });
+    // 1. 持久化用户消息
+    const userMetadata = attachments?.length
+      ? JSON.stringify({ attachments: attachments.map(a => ({ name: a.name, type: a.type, length: a.text.length })) })
+      : undefined;
+    await persistMessage(projectId, "user", content, userMetadata, expertIds);
 
-    // 2. 更新轮次计数（延后到主持人引导成功后，避免失败时占用总结轮次）
+    // 2. 更新轮次计数 + P3-1: 清除 redo 栈（新消息发送时重置 currentSeq）
     const newTurnCount = project.turnCount + 1;
+    if (project.currentSeq > 0) {
+      await prisma.project.update({ where: { id: projectId }, data: { currentSeq: 0 } });
+    }
 
-    // 3. 加载对话历史，并注入附件内容到上下文
-    const history = await this.loadConversationHistory(projectId);
-    const contextString = await this.buildContextString(history, projectId, attachments);
+    // 3. 加载对话历史 + 构建上下文
+    const history = await loadConversationHistory(projectId);
+    const currentSeq = await getNextSeq(projectId);
+    const contextString = await buildContextString(history, projectId, attachments, this.model, currentSeq, content, this.embeddingModel);
 
-    // 4. 主持人引导（使用 holder 对象避免 TDZ：流式期间 guideResult 尚未赋值）
+    // 4. 主持人引导
     const designatedExpertIdsHolder: { current: string[] | undefined } = { current: undefined };
     const guideResult = await this.hostAgent.guide(
-      content,
-      expertIds,
-      history.slice(-MAX_CONTEXT_ROUNDS),
-      (chunk) => {
-        callbacks.onHost?.(chunk, designatedExpertIdsHolder.current);
-      },
+      content, expertIds, history.slice(-MAX_CONTEXT_ROUNDS),
+      (chunk) => callbacks.onHost?.(chunk, designatedExpertIdsHolder.current),
       abortSignal,
       (toolName, input) => callbacks.onToolCall?.(null, toolName, input),
-      (project.phase || "diverge") as "diverge" | "converge"
+      (project.phase || "diverge") as "diverge" | "converge",
+      projectId
     );
     designatedExpertIdsHolder.current = guideResult.designatedExpertIds;
 
-    // 主持人引导成功后才更新轮次计数
-    await prisma.project.update({
-      where: { id: projectId },
-      data: { turnCount: newTurnCount },
-    });
+    await prisma.project.update({ where: { id: projectId }, data: { turnCount: newTurnCount } });
+    await persistMessage(projectId, "host", guideResult.guidance,
+      JSON.stringify({ designatedExpertIds: guideResult.designatedExpertIds }), expertIds);
 
-    // 持久化主持人消息
-    await prisma.message.create({
-      data: {
-        projectId,
-        role: "host",
-        content: guideResult.guidance,
-        metadata: JSON.stringify({ designatedExpertIds: guideResult.designatedExpertIds }),
-        seq: await this.getNextSeq(projectId),
-      },
-    });
-
-    // 5. 检查是否需要自动总结（引导之后执行，确保总结包含主持人引导内容）
-    if (newTurnCount % AUTO_SUMMARY_INTERVAL === 0) {
-      const refreshedHistory = await this.loadConversationHistory(projectId);
-      const refreshedContext = await this.buildContextString(refreshedHistory, projectId);
-
-      const summary = await this.hostAgent.generateSummary(
-        refreshedContext,
-        (chunk) => callbacks.onSummary?.(chunk),
-        abortSignal
-      );
-
-      await prisma.message.create({
-        data: {
-          projectId,
-          role: "summary",
-          content: summary,
-          seq: await this.getNextSeq(projectId),
-        },
-      });
+    // 5. 自动总结（P2-1: 跳过已触发动态总结的轮次）
+    const dynamicSummaryTurn = this.lastDynamicSummaryTurn.get(projectId);
+    const alreadySummarized = dynamicSummaryTurn === newTurnCount;
+    if (shouldAutoSummarize(newTurnCount) && !alreadySummarized) {
+      const refreshedHistory = await loadConversationHistory(projectId);
+      const refreshedSeq = await getNextSeq(projectId);
+      const refreshedContext = await buildContextString(refreshedHistory, projectId, undefined, this.model, refreshedSeq);
+      const summary = await this.hostAgent.generateSummary(refreshedContext, (chunk) => callbacks.onSummary?.(chunk), abortSignal, projectId);
+      await persistMessage(projectId, "summary", summary, undefined, expertIds);
     }
 
-    // 6. 专家轮次对话
-    await this.runExpertDiscussion(
-      projectId,
-      guideResult,
-      content,
-      contextString,
-      callbacks,
-      abortSignal,
-      undefined,
-      (project.phase || "diverge") as "diverge" | "converge"
-    );
+    // 6. 专家讨论
+    await this.runExpertDiscussion(projectId, guideResult, content, contextString, callbacks, abortSignal, undefined, (project.phase || "diverge") as "diverge" | "converge");
   }
 
   /**
-   * 处理用户干预指令：将以 / 开头的方向性干预持久化为干预类型消息。
-   *
-   * 与 handleUserMessage 不同，此方法不触发主持人引导与专家讨论流程，
-   * 仅持久化指令；该指令将在下一轮 runExpertDiscussion 时以
-   * 【用户干预指令】段落注入专家上下文，引导专家优先回应用户指定方向。
-   *
-   * @param directive 用户输入的干预指令原文（如 "/focus 成本控制"）
+   * 处理用户干预指令：持久化为 intervene 类型消息，不触发讨论流程
    */
-  async handleIntervene(
-    projectId: string,
-    directive: string,
-    abortSignal?: AbortSignal
-  ): Promise<void> {
-    // 若请求已被取消，直接返回
+  async handleIntervene(projectId: string, directive: string, abortSignal?: AbortSignal): Promise<void> {
     if (abortSignal?.aborted) return;
-
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-    });
+    const project = await prisma.project.findUnique({ where: { id: projectId } });
     if (!project) throw new Error("项目不存在");
-    if (project.status !== "active") {
-      throw new Error("该项目已结束，无法继续对话");
-    }
-
-    // 持久化干预指令：role=user，metadata 标记 type=intervene
-    await prisma.message.create({
-      data: {
-        projectId,
-        role: "user",
-        content: directive,
-        metadata: JSON.stringify({ type: "intervene" }),
-        seq: await this.getNextSeq(projectId),
-      },
-    });
-
-    // 不触发专家讨论流程，仅持久化供下一轮讨论使用
+    if (project.status !== "active") throw new Error("该项目已结束，无法继续对话");
+    const expertIds = JSON.parse(project.expertIds) as string[];
+    await persistMessage(projectId, "user", directive, JSON.stringify({ type: "intervene" }), expertIds);
   }
 
   /**
-   * 处理动态专家变更：邀请新专家或移除已有专家
-   *
-   * 校验规则：
-   * - 仅前 3 轮（turnCount < 3）允许变更
-   * - 每轮最多 1 次变更
-   * - 移除时至少保留 1 位专家
-   *
-   * 变更后创建 system 消息记录，返回更新后的 expertIds
+   * 动态专家变更：邀请新专家或移除已有专家
    */
-  async handleExpertChange(
-    projectId: string,
-    action: "add" | "remove",
-    expertId: string
-  ): Promise<string[]> {
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-    });
+  async handleExpertChange(projectId: string, action: "add" | "remove", expertId: string): Promise<string[]> {
+    const project = await prisma.project.findUnique({ where: { id: projectId } });
     if (!project) throw new Error("项目不存在");
-    if (project.status !== "active")
-      throw new Error("该项目已结束，无法修改专家");
+    if (project.status !== "active") throw new Error("该项目已结束，无法修改专家");
+    if (project.turnCount >= 3) throw new Error("已进入最后两轮讨论，不允许修改专家阵容");
 
     const expertIds = JSON.parse(project.expertIds) as string[];
 
-    // 校验轮次限制（前 3 轮才允许，最后两轮不允许）
-    if (project.turnCount >= 3) {
-      throw new Error("已进入最后两轮讨论，不允许修改专家阵容");
-    }
-
-    // 校验每轮 1 次变更：查询最近一条 expert_change 消息，比较其记录的轮次
+    // 校验每轮 1 次变更
     const existingChange = await prisma.message.findFirst({
-      where: {
-        projectId,
-        role: "system",
-        metadata: { contains: '"type":"expert_change"' },
-      },
+      where: { projectId, role: "system", metadata: { contains: '"type":"expert_change"' } },
       orderBy: { seq: "desc" },
     });
-    if (existingChange && existingChange.metadata) {
+    if (existingChange?.metadata) {
       try {
-        const meta = JSON.parse(existingChange.metadata) as {
-          type?: string;
-          turnCount?: number;
-        };
+        const meta = JSON.parse(existingChange.metadata) as { type?: string; turnCount?: number };
         if (meta.type === "expert_change" && meta.turnCount === project.turnCount) {
           throw new Error("本轮已修改过专家阵容，每轮仅允许一次变更");
         }
       } catch (e) {
-        // 重新抛出业务校验错误，避免被吞掉
         if (e instanceof Error && e.message.includes("本轮")) throw e;
-        // metadata 解析失败，允许变更
       }
     }
 
-    // 校验 expertId 存在
     const expert = await getExpertById(expertId);
     if (!expert) throw new Error("专家不存在");
 
-    // 校验 action 并执行变更
     if (action === "add") {
-      if (expertIds.includes(expertId))
-        throw new Error("该专家已在讨论中");
+      if (expertIds.includes(expertId)) throw new Error("该专家已在讨论中");
       expertIds.push(expertId);
     } else if (action === "remove") {
-      if (!expertIds.includes(expertId))
-        throw new Error("该专家不在当前讨论中");
-      if (expertIds.length <= 1)
-        throw new Error("至少需要保留一位专家");
-      const idx = expertIds.indexOf(expertId);
-      expertIds.splice(idx, 1);
+      if (!expertIds.includes(expertId)) throw new Error("该专家不在当前讨论中");
+      if (expertIds.length <= 1) throw new Error("至少需要保留一位专家");
+      expertIds.splice(expertIds.indexOf(expertId), 1);
     } else {
       throw new Error("无效的操作类型");
     }
 
-    // 更新 Project.expertIds
-    await prisma.project.update({
-      where: { id: projectId },
-      data: { expertIds: JSON.stringify(expertIds) },
-    });
-
-    // 创建 system 消息记录变更
-    await prisma.message.create({
-      data: {
-        projectId,
-        role: "system",
-        content:
-          action === "add"
-            ? `已邀请「${expert.name}」加入讨论`
-            : `已将「${expert.name}」移出讨论`,
-        metadata: JSON.stringify({
-          type: "expert_change",
-          action,
-          expertId,
-          expertName: expert.name,
-          turnCount: project.turnCount,
-        }),
-        seq: await this.getNextSeq(projectId),
-      },
-    });
+    await prisma.project.update({ where: { id: projectId }, data: { expertIds: JSON.stringify(expertIds) } });
+    await persistMessage(projectId, "system",
+      action === "add" ? `已邀请「${expert.name}」加入讨论` : `已将「${expert.name}」移出讨论`,
+      JSON.stringify({ type: "expert_change", action, expertId, expertName: expert.name, turnCount: project.turnCount }), expertIds);
 
     return expertIds;
   }
 
   /**
-   * 处理阶段切换：发散 → 收敛
-   * 创建 system 消息记录阶段变更
+   * 阶段切换：发散 → 收敛
    */
-  async handlePhaseTransition(
-    projectId: string,
-    newPhase: "converge"
-  ): Promise<void> {
+  async handlePhaseTransition(projectId: string, newPhase: "converge"): Promise<void> {
     const project = await prisma.project.findUnique({ where: { id: projectId } });
     if (!project) throw new Error("项目不存在");
     if (project.status !== "active") throw new Error("该项目已结束，无法切换阶段");
     if (project.phase === newPhase) throw new Error(`当前已处于${newPhase === "converge" ? "收敛" : "发散"}阶段`);
-    if (project.phase === "concluded") throw new Error("项目已结束，无法切换阶段");
 
     const oldPhase = project.phase;
-    await prisma.project.update({
-      where: { id: projectId },
-      data: { phase: newPhase },
-    });
-
-    await prisma.message.create({
-      data: {
-        projectId,
-        role: "system",
-        content: newPhase === "converge" ? "讨论已进入收敛阶段，专家将聚焦方案评估与取舍" : "讨论已进入发散阶段",
-        metadata: JSON.stringify({ type: "phase_change", from: oldPhase, to: newPhase }),
-        seq: await this.getNextSeq(projectId),
-      },
-    });
+    await prisma.project.update({ where: { id: projectId }, data: { phase: newPhase } });
+    await persistMessage(projectId, "system",
+      newPhase === "converge" ? "讨论已进入收敛阶段，专家将聚焦方案评估与取舍" : "讨论已进入发散阶段",
+      JSON.stringify({ type: "phase_change", from: oldPhase, to: newPhase }),
+      JSON.parse(project.expertIds) as string[]);
   }
 
   /**
-   * 编辑用户消息后重建对话：删除后续消息 → 更新内容 → 重新生成
+   * 编辑用户消息后重建对话
    */
-  async handleEditedMessage(
-    projectId: string,
-    messageId: string,
-    newContent: string,
-    callbacks: EngineCallbacks,
-    abortSignal?: AbortSignal
-  ): Promise<void> {
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-    });
+  async handleEditedMessage(projectId: string, messageId: string, newContent: string, callbacks: EngineCallbacks, abortSignal?: AbortSignal): Promise<void> {
+    const project = await prisma.project.findUnique({ where: { id: projectId } });
     if (!project) throw new Error("项目不存在");
-    if (project.status !== "active")
-      throw new Error("该项目已结束，无法继续对话");
+    if (project.status !== "active") throw new Error("该项目已结束，无法继续对话");
 
-    // 1. 获取目标消息
-    const targetMessage = await prisma.message.findUnique({
-      where: { id: messageId },
-    });
+    const targetMessage = await prisma.message.findUnique({ where: { id: messageId } });
     if (!targetMessage) throw new Error("消息不存在");
     if (targetMessage.role !== "user") throw new Error("只能编辑用户消息");
-    if (targetMessage.projectId !== projectId) {
-      throw new Error("消息不属于该项目");
-    }
+    if (targetMessage.projectId !== projectId) throw new Error("消息不属于该项目");
 
-    // 2. 删除该消息之后的所有消息
-    await prisma.message.deleteMany({
-      where: {
-        projectId,
-        seq: { gt: targetMessage.seq },
-      },
-    });
+    await prisma.message.deleteMany({ where: { projectId, seq: { gt: targetMessage.seq } } });
+    await prisma.message.update({ where: { id: messageId }, data: { content: newContent } });
 
-    // 3. 更新目标消息内容
-    await prisma.message.update({
-      where: { id: messageId },
-      data: { content: newContent },
-    });
-
-    // 4. 重新加载历史（已截断到编辑点）
-    const history = await this.loadConversationHistory(projectId);
-    const contextString = await this.buildContextString(history, projectId);
+    const history = await loadConversationHistory(projectId);
+    const contextString = await buildContextString(history, projectId, undefined, this.model, await getNextSeq(projectId), newContent, this.embeddingModel);
     const expertIds = JSON.parse(project.expertIds) as string[];
-
-    // 5. 主持人引导（使用 holder 对象避免 TDZ：流式期间 guideResult 尚未赋值）
     const designatedExpertIdsHolder: { current: string[] | undefined } = { current: undefined };
     const guideResult = await this.hostAgent.guide(
-      newContent,
-      expertIds,
-      history.slice(-MAX_CONTEXT_ROUNDS),
-      (chunk) => {
-        callbacks.onHost?.(chunk, designatedExpertIdsHolder.current);
-      },
+      newContent, expertIds, history.slice(-MAX_CONTEXT_ROUNDS),
+      (chunk) => callbacks.onHost?.(chunk, designatedExpertIdsHolder.current),
       abortSignal,
       (toolName, input) => callbacks.onToolCall?.(null, toolName, input),
-      (project.phase || "diverge") as "diverge" | "converge"
+      (project.phase || "diverge") as "diverge" | "converge",
+      projectId
     );
     designatedExpertIdsHolder.current = guideResult.designatedExpertIds;
 
-    // 持久化主持人消息
-    await prisma.message.create({
-      data: {
-        projectId,
-        role: "host",
-        content: guideResult.guidance,
-        metadata: JSON.stringify({ designatedExpertIds: guideResult.designatedExpertIds }),
-        seq: await this.getNextSeq(projectId),
-      },
-    });
+    await persistMessage(projectId, "host", guideResult.guidance,
+      JSON.stringify({ designatedExpertIds: guideResult.designatedExpertIds }), expertIds);
 
-    // 6. 专家轮次对话
-    await this.runExpertDiscussion(
-      projectId,
-      guideResult,
-      newContent,
-      contextString,
-      callbacks,
-      abortSignal,
-      undefined,
-      (project.phase || "diverge") as "diverge" | "converge"
-    );
+    await this.runExpertDiscussion(projectId, guideResult, newContent, contextString, callbacks, abortSignal, undefined, (project.phase || "diverge") as "diverge" | "converge");
   }
 
   /**
-   * 专家轮次对话：多位专家交叉讨论，用户可随时打断
-   * 支持 resumeState 从暂停点恢复
+   * 专家讨论核心逻辑（XState 状态机驱动）
+   *
+   * Bridge 模式：状态机负责调度决策，引擎宿主负责 SSE 流式输出。
    */
   private async runExpertDiscussion(
     projectId: string,
@@ -492,441 +251,209 @@ export class BrainstormEngine {
     contextString: string,
     callbacks: EngineCallbacks,
     abortSignal?: AbortSignal,
-    resumeState?: {
-      startRound: number;
-      startIndex: number;
-      completedTurns: number;
-    },
+    resumeState?: { startRound: number; startIndex: number; completedTurns: number },
     phase: "diverge" | "converge" = "diverge"
   ): Promise<void> {
     const activeExpertIds = guideResult.designatedExpertIds;
     let turnContext = contextString;
 
-    // 注入未消费的用户干预指令：以【用户干预指令】段落追加到上下文末尾，
-    // 配合 expert-system 提示词，引导专家优先围绕用户指定方向展开讨论。
-    // 注入后立即标记为已消费，避免在后续讨论（如暂停恢复）中重复强调。
-    const interventions = await this.consumeUnconsumedInterventions(projectId);
+    // 注入未消费的用户干预指令
+    const interventions = await consumeUnconsumedInterventions(projectId);
     if (interventions.length > 0) {
-      turnContext += `\n\n【用户干预指令】\n${interventions
-        .map((d) => `- ${d}`)
-        .join("\n")}`;
+      turnContext += `\n\n【用户干预指令】\n${interventions.map(d => `- ${d}`).join("\n")}`;
     }
 
-    const startRound = resumeState?.startRound ?? 0;
-    const startIndex = resumeState?.startIndex ?? 0;
-    let turnCount = resumeState?.completedTurns ?? 0;
-    const pauseBase = resumeState?.completedTurns ?? 0;
-    const totalTurns = MAX_EXPERT_ROUNDS * activeExpertIds.length;
+    // 创建状态机 Actor
+    const actor = createDiscussionActor({ expertIds: activeExpertIds });
+    actor.start();
 
-    for (let round = startRound; round < MAX_EXPERT_ROUNDS; round++) {
-      const startI = round === startRound ? startIndex : 0;
-      for (let i = startI; i < activeExpertIds.length; i++) {
-        const expertId = activeExpertIds[i];
-        const isLastOverall =
-          round === MAX_EXPERT_ROUNDS - 1 &&
-          i === activeExpertIds.length - 1;
+    if (resumeState) {
+      actor.send({ type: "RESUME_FROM", expertIds: activeExpertIds, ...resumeState });
+    } else {
+      actor.send({ type: "START", expertIds: activeExpertIds });
+      actor.send({ type: "HOST_DONE" });
+    }
 
-        // 检查打断
-        if (abortSignal?.aborted) return;
+    // 注册 Actor 到软停止注册表（允许跨请求触发 SOFT_STOP）
+    registerDiscussionActor(projectId, actor);
+    let softStopTriggered = false;
 
-        // 通知前端即将发言的专家（提前切换气泡颜色）
-        callbacks.onExpertStart?.(expertId, round);
+    try {
+    // 讨论循环
+    while (true) {
+      const snapshot = actor.getSnapshot();
 
-        // 收集当前专家的搜索结果
-        const expertSearchResults: string[] = [];
+      // 完成或中止
+      if (snapshot.value === "completed") {
+        // 知识提取已在下方 roundAfter !== roundBefore || newSnapshot.value === "completed" 处理
+        if (softStopTriggered) {
+          callbacks.onSoftStopComplete?.();
+        }
+        actor.stop();
+        return;
+      }
 
-        // 专家发言
-        const expertResponse = await this.expertAgent.respond(
-          expertId,
-          guideResult.guidance,
-          userMessage,
+      // 暂停
+      if (snapshot.value === "paused") {
+        const ctx = snapshot.context;
+        const pauseSummary = await this.hostAgent.generateMidDiscussionSummary(
           turnContext,
-          (chunk) => callbacks.onExpert?.(chunk, expertId, round),
+          (chunk) => callbacks.onPause?.(chunk, ctx.totalTurns - ctx.completedTurns),
           abortSignal,
-          isLastOverall, // 最后一位专家需要 [HOOK] 结尾
-          // onToolCall — 转发到前端
-          (toolName, input) => callbacks.onToolCall?.(expertId, toolName, input),
-          // onToolResult — 收集搜索结果供后续专家参考
-          (toolName, input, output) => {
-            if (toolName === "webSearch") {
-              const queries = typeof input === "object" && input !== null
-                ? (input as { queries?: string[] }).queries ?? []
-                : [];
-              const queryLabel = queries.length > 0 ? queries.join(" / ") : "未知关键词";
-              const results = typeof output === "object" && output !== null
-                ? (output as { results?: string }).results ?? ""
-                : String(output);
-              if (results) {
-                expertSearchResults.push(`搜索"${queryLabel}"的结果：\n${results}`);
-              }
-            }
-          },
-          phase
+          projectId
         );
+        await persistMessage(projectId, "pause", pauseSummary, JSON.stringify({
+          type: "pause", guideResult, userMessage,
+          completedTurns: ctx.completedTurns, totalTurns: ctx.totalTurns,
+          startRound: ctx.currentRound, startIndex: ctx.currentIndex,
+          activeExpertIds,
+        }), activeExpertIds);
+        actor.stop();
+        return;
+      }
 
-        // 持久化专家消息
-        await prisma.message.create({
-          data: {
-            projectId,
-            role: `expert:${expertId}`,
-            content: expertResponse,
-            metadata: JSON.stringify({ expertId, round }),
-            seq: await this.getNextSeq(projectId),
-          },
-        });
+      // 仅在 discussing / softStopping 状态下继续
+      if (snapshot.value !== "discussing" && snapshot.value !== "softStopping") {
+        actor.stop();
+        return;
+      }
 
-        // 追加搜索结果到上下文（供下一位专家参考）
-        const expert = await getExpertById(expertId);
-        if (expertSearchResults.length > 0) {
-          turnContext += `\n\n[${expert?.name ?? "专家"}的搜索发现]：\n${expertSearchResults.join("\n\n")}`;
-        }
-        turnContext += `\n\n[${expert?.name ?? "专家"}]：${expertResponse}`;
+      // 软停止触发通知（仅第一次进入 softStopping 时）
+      if (snapshot.value === "softStopping" && !softStopTriggered) {
+        softStopTriggered = true;
+        callbacks.onSoftStop?.();
+      }
 
-        turnCount++;
+      const expertId = getCurrentExpertId(snapshot);
+      if (!expertId || abortSignal?.aborted) { actor.stop(); return; }
 
-        // 检查打断
-        if (abortSignal?.aborted) return;
+      const round = getCurrentRound(snapshot);
+      const isLast = isLastExpert(snapshot);
 
-        // 暂停检测：达到阈值且还有剩余轮次
-        if (
-          turnCount - pauseBase >= PAUSE_AFTER_EXPERT_TURNS &&
-          turnCount < totalTurns
-        ) {
-          const pauseSummary = await this.hostAgent.generateMidDiscussionSummary(
-            turnContext,
-            (chunk) => callbacks.onPause?.(chunk, totalTurns - turnCount),
-            abortSignal
-          );
+      callbacks.onExpertStart?.(expertId, round);
 
-          // 持久化暂停总结，包含恢复所需的元数据
-          await prisma.message.create({
-            data: {
-              projectId,
-              role: "pause",
-              content: pauseSummary,
-              metadata: JSON.stringify({
-                type: "pause",
-                guideResult,
-                userMessage,
-                completedTurns: turnCount,
-                totalTurns,
-                startRound: round,
-                startIndex: i + 1,
-                activeExpertIds,
-              }),
-              seq: await this.getNextSeq(projectId),
-            },
+      // 收集搜索结果
+      const expertSearchResults: string[] = [];
+
+      // 专家发言
+      const expertResponse = await this.expertAgent.respond(
+        projectId, expertId, guideResult.guidance, userMessage, turnContext,
+        (chunk) => callbacks.onExpert?.(chunk, expertId, round),
+        abortSignal, isLast,
+        (toolName, input) => callbacks.onToolCall?.(expertId, toolName, input),
+        (toolName, input, output) => {
+          if (toolName === "webSearch") {
+            const queries = typeof input === "object" && input !== null ? (input as { queries?: string[] }).queries ?? [] : [];
+            const queryLabel = queries.length > 0 ? queries.join(" / ") : "未知关键词";
+            const results = typeof output === "object" && output !== null ? (output as { results?: string }).results ?? "" : String(output);
+            if (results) expertSearchResults.push(`搜索"${queryLabel}"的结果：\n${results}`);
+          }
+        },
+        phase,
+        this.embeddingModel
+      );
+
+      // 持久化专家消息
+      await persistMessage(projectId, `expert:${expertId}`, expertResponse, JSON.stringify({ expertId, round }), activeExpertIds);
+
+      // 追加搜索结果 + 专家发言到上下文
+      const expert = await getExpertById(expertId);
+      if (expertSearchResults.length > 0) {
+        turnContext += `\n\n[${expert?.name ?? "专家"}的搜索发现]：\n${expertSearchResults.join("\n\n")}`;
+      }
+      turnContext += `\n\n[${expert?.name ?? "专家"}]：${expertResponse}`;
+
+      if (abortSignal?.aborted) { actor.stop(); return; }
+
+      // 推进状态机
+      const roundBefore = getCurrentRound(actor.getSnapshot());
+      actor.send({ type: "EXPERT_DONE" });
+      const newSnapshot = actor.getSnapshot();
+      const roundAfter = getCurrentRound(newSnapshot);
+
+      // 轮次结束时提取知识
+      if (roundAfter !== roundBefore || newSnapshot.value === "completed") {
+        await extractKnowledgeForRound(this.model, projectId, turnContext, abortSignal, this.embeddingModel, [expertId]);
+
+        // P2-1: 动态总结触发 — 查询知识计数，通知状态机
+        if (newSnapshot.value === "discussing" || newSnapshot.value === "softStopping") {
+          const counts = await getKnowledgeCounts(projectId);
+          actor.send({
+            type: "TRIGGER_SUMMARY",
+            consensusCount: counts.consensus,
+            divergenceCount: counts.divergence,
           });
-
-          return; // 暂停：流结束
+          const summarySnapshot = actor.getSnapshot();
+          if (summarySnapshot.value === "summarizing") {
+            // 状态机决定触发动态总结
+            const proj = await prisma.project.findUnique({ where: { id: projectId }, select: { turnCount: true } });
+            this.lastDynamicSummaryTurn.set(projectId, proj?.turnCount ?? 0);
+            const summaryContext = await buildContextString(
+              await loadConversationHistory(projectId), projectId, undefined,
+              this.model, await getNextSeq(projectId)
+            );
+            const summary = await this.hostAgent.generateSummary(
+              summaryContext, (chunk) => callbacks.onSummary?.(chunk),
+              abortSignal, projectId
+            );
+            await persistMessage(projectId, "summary", summary, undefined, activeExpertIds);
+            actor.send({ type: "SUMMARY_DONE" });
+          }
         }
       }
-      if (abortSignal?.aborted) return;
-
-      // 每轮结束后异步提取知识条目存入共享知识库（不阻塞流式输出，错误静默处理）
-      try {
-        await extractAndSaveKnowledge(
-          this.model,
-          projectId,
-          turnContext,
-          abortSignal
-        );
-      } catch {
-        // 知识提取失败不影响讨论流程
-      }
+    }
+    } finally {
+      // 注销 Actor，允许后续讨论重新注册
+      unregisterDiscussionActor(projectId);
     }
   }
 
   /**
    * 继续被暂停的专家讨论
-   * 加载历史 → 查找暂停点 → 可选持久化用户补充输入 → 继续剩余专家轮次
    */
-  async handleContinueDiscussion(
-    projectId: string,
-    userInput: string | null,
-    callbacks: EngineCallbacks,
-    abortSignal?: AbortSignal
-  ): Promise<void> {
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-    });
+  async handleContinueDiscussion(projectId: string, userInput: string | null, callbacks: EngineCallbacks, abortSignal?: AbortSignal): Promise<void> {
+    const project = await prisma.project.findUnique({ where: { id: projectId } });
     if (!project) throw new Error("项目不存在");
-    if (project.status !== "active")
-      throw new Error("该项目已结束，无法继续对话");
+    if (project.status !== "active") throw new Error("该项目已结束，无法继续对话");
 
-    // 1. 查找最后一条暂停消息
-    const pauseMessage = await prisma.message.findFirst({
-      where: { projectId, role: "pause" },
-      orderBy: { seq: "desc" },
-    });
+    // 查找最后一条暂停消息
+    const pauseMessage = await prisma.message.findFirst({ where: { projectId, role: "pause" }, orderBy: { seq: "desc" } });
     if (!pauseMessage) throw new Error("未找到暂停点，无法继续讨论");
 
-    // 2. 防止重复继续
-    const expertCountAfterPause = await prisma.message.count({
-      where: {
-        projectId,
-        seq: { gt: pauseMessage.seq },
-        role: { startsWith: "expert:" },
-      },
-    });
-    if (expertCountAfterPause > 0) {
-      throw new Error("该暂停点的讨论已继续，无需重复操作");
+    // 防止重复继续
+    const expertCountAfterPause = await prisma.message.count({ where: { projectId, seq: { gt: pauseMessage.seq }, role: { startsWith: "expert:" } } });
+    if (expertCountAfterPause > 0) throw new Error("该暂停点的讨论已继续，无需重复操作");
+
+    // 解析暂停元数据
+    const pauseMeta = JSON.parse(pauseMessage.metadata!) as { guideResult: HostGuideResult; userMessage: string; completedTurns: number; totalTurns: number; startRound: number; startIndex: number; activeExpertIds: string[] };
+
+    // 可选：持久化用户补充输入
+    if (userInput?.trim()) {
+      await persistMessage(projectId, "user", userInput.trim(), undefined,
+        JSON.parse(project.expertIds) as string[]);
     }
 
-    // 3. 解析暂停元数据
-    const pauseMeta = JSON.parse(pauseMessage.metadata!) as {
-      guideResult: HostGuideResult;
-      userMessage: string;
-      completedTurns: number;
-      totalTurns: number;
-      startRound: number;
-      startIndex: number;
-      activeExpertIds: string[];
-    };
+    // 重新加载上下文
+    const history = await loadConversationHistory(projectId);
+    const contextString = await buildContextString(history, projectId, undefined, this.model, await getNextSeq(projectId));
 
-    // 4. 可选：持久化用户补充输入
-    if (userInput && userInput.trim()) {
-      await prisma.message.create({
-        data: {
-          projectId,
-          role: "user",
-          content: userInput.trim(),
-          seq: await this.getNextSeq(projectId),
-        },
-      });
-    }
-
-    // 5. 重新加载对话历史（含暂停总结 + 可选用户输入）
-    const history = await this.loadConversationHistory(projectId);
-    const contextString = await this.buildContextString(history, projectId);
-
-    // 6. 继续剩余专家讨论
-    await this.runExpertDiscussion(
-      projectId,
-      pauseMeta.guideResult,
-      pauseMeta.userMessage,
-      contextString,
-      callbacks,
-      abortSignal,
-      {
-        startRound: pauseMeta.startRound,
-        startIndex: pauseMeta.startIndex,
-        completedTurns: pauseMeta.completedTurns,
-      },
-      (project.phase || "diverge") as "diverge" | "converge"
-    );
+    // 继续剩余专家讨论
+    await this.runExpertDiscussion(projectId, pauseMeta.guideResult, pauseMeta.userMessage, contextString, callbacks, abortSignal, { startRound: pauseMeta.startRound, startIndex: pauseMeta.startIndex, completedTurns: pauseMeta.completedTurns }, (project.phase || "diverge") as "diverge" | "converge");
   }
 
-  /**
-   * 生成阶段总结（手动触发）
-   */
-  async generateSummary(
-    projectId: string,
-    callbacks: EngineCallbacks,
-    abortSignal?: AbortSignal
-  ): Promise<void> {
-    const history = await this.loadConversationHistory(projectId);
-    const contextString = await this.buildContextString(history, projectId);
-
-    const summary = await this.hostAgent.generateSummary(
-      contextString,
-      (chunk) => callbacks.onSummary?.(chunk),
-      abortSignal
-    );
-
-    await prisma.message.create({
-      data: {
-        projectId,
-        role: "summary",
-        content: summary,
-        seq: await this.getNextSeq(projectId),
-      },
-    });
+  async generateSummary(projectId: string, callbacks: EngineCallbacks, abortSignal?: AbortSignal): Promise<void> {
+    await this.documentManager.generateSummary(projectId, callbacks, abortSignal);
   }
 
-  /**
-   * 结束脑暴，生成会议纪要
-   */
-  async generateMinutes(
-    projectId: string,
-    callbacks: EngineCallbacks,
-    abortSignal?: AbortSignal
-  ): Promise<void> {
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-    });
-    if (!project) throw new Error("项目不存在");
-    if (project.status !== "active") {
-      throw new Error("该项目已结束，无法重复生成纪要");
-    }
-
-    const history = await this.loadConversationHistory(projectId);
-    const contextString = await this.buildContextString(history, projectId);
-
-    const minutes = await this.hostAgent.generateMinutes(
-      project.title,
-      contextString,
-      (chunk) => callbacks.onMinutes?.(chunk),
-      abortSignal
-    );
-
-    // 保存纪要
-    await prisma.generatedDocument.create({
-      data: {
-        projectId,
-        docType: "minutes",
-        content: minutes,
-      },
-    });
-
-    // 更新项目状态
-    await prisma.project.update({
-      where: { id: projectId },
-      data: {
-        status: "completed",
-        phase: "concluded",
-        completedAt: new Date(),
-      },
-    });
+  async generateMinutes(projectId: string, callbacks: EngineCallbacks, abortSignal?: AbortSignal): Promise<void> {
+    await this.documentManager.generateMinutesWithSetup(projectId, callbacks, abortSignal);
   }
 
-  /**
-   * 生成文档草稿（PRD/SPEC）
-   */
-  async generateDocument(
-    projectId: string,
-    docType: DocumentType,
-    content: string,
-    callbacks: EngineCallbacks,
-    abortSignal?: AbortSignal
-  ): Promise<void> {
-    const doc = await this.documentAgent.generate(docType, content, (chunk) => {
-      callbacks.onDocument?.(chunk);
-    }, abortSignal);
-
-    // 保存文档
-    await prisma.generatedDocument.create({
-      data: {
-        projectId,
-        docType,
-        content: doc,
-      },
-    });
+  async generateDocument(projectId: string, docType: DocumentType, content: string, callbacks: EngineCallbacks, abortSignal?: AbortSignal): Promise<void> {
+    await this.documentManager.generateDocument(projectId, docType, content, callbacks, abortSignal);
   }
 
-  /**
-   * 生成思维导图：基于会议纪要流式输出 Markdown 格式的思维导图
-   */
-  async generateMindmap(
-    projectId: string,
-    callbacks: { onMindmap?: (chunk: string) => void; onError?: (message: string) => void },
-    abortSignal?: AbortSignal
-  ): Promise<void> {
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      include: {
-        documents: {
-          where: { docType: "minutes" },
-          orderBy: { createdAt: "desc" },
-          take: 1,
-        },
-      },
-    });
-
-    if (!project) throw new Error("项目不存在");
-    if (project.documents.length === 0) throw new Error("请先生成会议纪要");
-
-    const minutesContent = project.documents[0].content;
-
-    try {
-      const mindmapMarkdown = await this.mindmapAgent.generateMindmap(
-        minutesContent,
-        (chunk) => callbacks.onMindmap?.(chunk),
-        abortSignal
-      );
-
-      // 保存思维导图到 GeneratedDocument
-      await prisma.generatedDocument.create({
-        data: {
-          projectId,
-          docType: "mindmap",
-          content: mindmapMarkdown,
-        },
-      });
-    } catch (e) {
-      const message = e instanceof Error ? e.message : "生成思维导图失败";
-      callbacks.onError?.(message);
-    }
-  }
-
-  /**
-   * 加载对话历史（按 seq 排序，保证严格顺序）
-   */
-  private async loadConversationHistory(
-    projectId: string
-  ): Promise<ConversationMessage[]> {
-    const messages = await prisma.message.findMany({
-      where: { projectId },
-      orderBy: { seq: "asc" },
-    });
-
-    return messages.map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
-  }
-
-  /**
-   * 构建上下文字符串（含共享知识库摘要 + 附件资料）
-   *
-   * @param attachments 当前用户消息携带的附件，注入为"附件资料"段落供专家引用
-   */
-  private async buildContextString(
-    history: ConversationMessage[],
-    projectId?: string,
-    attachments?: MessageAttachment[]
-  ): Promise<string> {
-    // 保留最近20轮完整对话
-    const recentMessages = history.slice(-MAX_CONTEXT_ROUNDS * 3);
-
-    const lines: string[] = [];
-    for (const m of recentMessages) {
-      const roleLabel = await this.getRoleLabel(m.role);
-      lines.push(`[${roleLabel}]：${m.content}`);
-    }
-
-    // 注入附件资料（拼装为独立段落，供主持人/专家引用）
-    if (attachments && attachments.length > 0) {
-      const attachmentLines = attachments.map(
-        (a) => `--- 附件：${a.name} ---\n${a.text}`
-      );
-      lines.push(`\n【附件资料】\n${attachmentLines.join("\n\n")}`);
-    }
-
-    // 注入共享知识库摘要
-    if (projectId) {
-      const knowledgeSummary = await queryKnowledge(projectId);
-      if (knowledgeSummary) {
-        lines.push(`\n【共享知识库】\n${knowledgeSummary}`);
-      }
-    }
-
-    return lines.join("\n\n");
-  }
-
-  /**
-   * 获取角色显示名称
-   */
-  private async getRoleLabel(role: string): Promise<string> {
-    if (role === "user") return "用户";
-    if (role === "host") return "主持人";
-    if (role === "summary") return "阶段总结";
-    if (role === "pause") return "中场总结";
-    if (role.startsWith("expert:")) {
-      const expertId = role.slice(7);
-      const expert = await getExpertById(expertId);
-      return expert?.name ?? "专家";
-    }
-    return role;
+  async generateMindmap(projectId: string, callbacks: { onMindmap?: (chunk: string) => void; onError?: (message: string) => void }, abortSignal?: AbortSignal): Promise<void> {
+    await this.documentManager.generateMindmap(projectId, callbacks, abortSignal);
   }
 }

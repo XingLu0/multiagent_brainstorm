@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import React, { useState, useCallback, useRef } from "react";
 import { PasteArea } from "./paste-area";
@@ -48,7 +48,7 @@ export function DocGenerator({ projectId, initialContent = "" }: DocGeneratorPro
       abortRef.current = controller;
 
       try {
-        const response = await fetchWithConfig(`/api/sessions/${projectId}/documents`, {
+        const response = await fetchWithConfig(`/api/v1/sessions/${projectId}/documents`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ type, content }),

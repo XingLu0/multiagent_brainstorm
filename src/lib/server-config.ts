@@ -1,4 +1,4 @@
-import { createLLMModel, resolveLLMConfig, type LLMConfig } from "@/lib/llm";
+import { createLLMModel, createEmbeddingModel, resolveLLMConfig, type LLMConfig } from "@/lib/llm";
 import { BrainstormEngine } from "@/lib/engine/brainstorm-engine";
 
 const CONFIG_HEADER = "X-LLM-Config";
@@ -32,5 +32,12 @@ export function resolveConfigFromRequest(request: Request): LLMConfig {
 export function createEngineFromRequest(request: Request): BrainstormEngine {
   const config = resolveConfigFromRequest(request);
   const model = createLLMModel(config);
-  return new BrainstormEngine(model, config, config.searchApiKey);
+  // P2-2: 创建 embedding 模型（API 不支持时静默降级为全量 dump）
+  let embeddingModel;
+  try {
+    embeddingModel = createEmbeddingModel(config);
+  } catch {
+    embeddingModel = undefined;
+  }
+  return new BrainstormEngine(model, config, config.searchApiKey, embeddingModel);
 }

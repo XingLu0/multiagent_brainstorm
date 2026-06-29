@@ -1,6 +1,6 @@
 {
   "name": "ai-brainstorm",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "private": true,
   "license": "MIT",
   "main": "dist-electron/main.js",
@@ -28,16 +28,20 @@
     "@ai-sdk/openai": "^3.0.74",
     "@prisma/adapter-better-sqlite3": "^7.8.0",
     "@prisma/client": "^7.8.0",
+    "@sentry/node": "^10.62.0",
+    "@sentry/react": "^10.62.0",
     "ai": "^6.0.208",
     "better-sqlite3": "^12.11.1",
     "markmap-lib": "^0.18.12",
     "markmap-view": "^0.18.12",
     "next": "16.2.9",
+    "next-intl": "^4.13.0",
     "prisma": "^7.8.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "xstate": "^5.32.2"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.4",
@@ -45,6 +49,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@vitest/coverage-v8": "^4.1.9",
     "concurrently": "^10.0.3",
     "electron": "^42.5.0",
     "electron-builder": "^26.15.3",
@@ -53,6 +58,7 @@
     "tailwindcss": "^4",
     "tsx": "^4",
     "typescript": "^5",
+    "vitest": "^4.1.9",
     "wait-on": "^9.0.10"
   }
 }

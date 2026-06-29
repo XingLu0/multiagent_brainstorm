@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import React, { useState } from "react";
 import { useExperts } from "@/lib/hooks/use-experts";
@@ -54,7 +54,7 @@ export function ExpertPicker({ selectedIds, onChange }: ExpertPickerProps) {
     if (!name.trim() || !persona.trim()) return;
     setCreating(true);
     try {
-      const res = await fetch("/api/experts", {
+      const res = await fetch("/api/v1/experts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -82,7 +82,7 @@ export function ExpertPicker({ selectedIds, onChange }: ExpertPickerProps) {
     if (!name.trim() || !persona.trim()) return;
     setCreating(true);
     try {
-      const res = await fetch(`/api/experts/${id}`, {
+      const res = await fetch(`/api/v1/experts/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -106,7 +106,7 @@ export function ExpertPicker({ selectedIds, onChange }: ExpertPickerProps) {
 
   const handleDelete = async (id: string) => {
     try {
-      const res = await fetch(`/api/experts/${id}`, {
+      const res = await fetch(`/api/v1/experts/${id}`, {
         method: "DELETE",
       });
       if (res.ok) {

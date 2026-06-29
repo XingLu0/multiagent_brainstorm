@@ -201,3 +201,111 @@ export function rebuildStateFromMessages(
     consensus: knowledgeCounts.consensus,
   };
 }
+
+/**
+ * 从快照基线状态重放增量消息，重建讨论状态
+ *
+ * 与 rebuildStateFromMessages 类似，但从 baseState 起始而非从零开始，
+ * 仅处理快照点之后的增量消息。避免了长讨论时扫描全部消息。
+ *
+ * @param baseState 快照时的基线状态
+ * @param messages 快照点之后的增量消息（按 seq 升序）
+ * @param experts 当前可用的专家定义
+ * @param knowledgeCounts 知识库计数
+ * @param isCompleted 项目是否已结束
+ */
+export function replayFromBaseState(
+  baseState: DiscussionState,
+  messages: RebuildMessage[],
+  experts: ExpertDefinition[],
+  knowledgeCounts: { consensus: number; divergence: number },
+  isCompleted = false
+): DiscussionState {
+  // 以 baseState 为起点
+  let phase: DiscussionPhase = baseState.phase;
+  let currentRound = baseState.currentRound;
+  let completedTurns = baseState.completedTurns;
+  let totalTurns = baseState.totalTurns;
+
+  const expertsByRound = new Map<number, Set<string>>();
+  // 从 baseState 的 activeExperts 初始化当前轮已发言集合
+  if (baseState.activeExperts.length > 0) {
+    const spokenSet = new Set<string>();
+    for (const e of baseState.activeExperts) {
+      if (e.spoken) spokenSet.add(e.id);
+    }
+    expertsByRound.set(currentRound, spokenSet);
+  }
+
+  let activeExpertIds = baseState.activeExperts.map(e => e.id);
+
+  for (const msg of messages) {
+    if (msg.role.startsWith("expert:")) {
+      const expertId = msg.role.slice(7);
+      const meta = parseMetadata(msg.metadata);
+      const round = meta && typeof meta.round === "number" ? meta.round : currentRound;
+      if (!expertsByRound.has(round)) expertsByRound.set(round, new Set());
+      expertsByRound.get(round)!.add(expertId);
+      completedTurns++;
+    } else if (msg.role === "host") {
+      const meta = parseMetadata(msg.metadata);
+      if (meta && Array.isArray(meta.designatedExpertIds)) {
+        activeExpertIds = meta.designatedExpertIds as string[];
+      }
+    }
+  }
+
+  // 更新当前轮次
+  if (expertsByRound.size > 0) {
+    currentRound = Math.max(...expertsByRound.keys());
+  }
+  const spokenInCurrentRound = expertsByRound.get(currentRound) ?? new Set<string>();
+
+  // 收集增量消息中的专家 ID
+  const expertMsgIds = new Set<string>(activeExpertIds);
+  for (const set of expertsByRound.values()) {
+    for (const id of set) expertMsgIds.add(id);
+  }
+
+  // 检查最后一条消息是否为 pause
+  const lastMsg = messages[messages.length - 1];
+  if (lastMsg && lastMsg.role === "pause") {
+    const pauseMeta = parseMetadata(lastMsg.metadata);
+    if (pauseMeta) {
+      phase = "paused";
+      if (typeof pauseMeta.totalTurns === "number") totalTurns = pauseMeta.totalTurns;
+      if (typeof pauseMeta.completedTurns === "number") completedTurns = pauseMeta.completedTurns;
+      if (Array.isArray(pauseMeta.activeExpertIds)) activeExpertIds = pauseMeta.activeExpertIds as string[];
+    }
+  } else if (isCompleted) {
+    phase = "completed";
+  }
+
+  // 非 paused 态下推算 totalTurns
+  if (phase !== "paused" && totalTurns === 0 && activeExpertIds.length > 0) {
+    totalTurns = MAX_EXPERT_ROUNDS * activeExpertIds.length;
+  }
+
+  // 构建 activeExperts 列表
+  const activeExperts: ExpertState[] = activeExpertIds.map((id) => {
+    const def = experts.find((e) => e.id === id);
+    return {
+      id,
+      name: def?.name ?? id,
+      avatarColor: def?.avatarColor ?? "emerald",
+      spoken: spokenInCurrentRound.has(id),
+      speaking: false,
+    };
+  });
+
+  return {
+    phase,
+    currentRound,
+    maxRounds: MAX_EXPERT_ROUNDS,
+    totalTurns,
+    completedTurns,
+    activeExperts,
+    divergences: knowledgeCounts.divergence,
+    consensus: knowledgeCounts.consensus,
+  };
+}

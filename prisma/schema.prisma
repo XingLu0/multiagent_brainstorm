@@ -15,11 +15,13 @@ model Project {
   status      String   @default("active")
   phase       String   @default("diverge")
   turnCount   Int      @default(0)
+  currentSeq  Int      @default(0) // P3-1: 撤销/重做指针（0=最新，>0=已撤销到历史位置）
   createdAt   DateTime @default(now())
   completedAt DateTime?
   messages    Message[]
   documents   GeneratedDocument[]
   knowledgeEntries KnowledgeEntry[]
+  snapshots   StateSnapshot[]
 
   @@index([status])
   @@index([createdAt])
@@ -71,7 +73,64 @@ model KnowledgeEntry {
   category        String
   content         String
   sourceMessageId String?
+  embedding       String?
   createdAt       DateTime @default(now())
 
+  @@index([projectId])
+}
+
+model StateSnapshot {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  seq       Int
+  state     String
+  createdAt DateTime @default(now())
+
+  @@index([projectId, seq])
+}
+
+model LLMCallLog {
+  id           String   @id @default(cuid())
+  model        String
+  inputTokens  Int?
+  outputTokens Int?
+  durationMs   Int
+  success      Boolean
+  errorMessage String?
+  projectId    String?
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([projectId])
+  @@index([success])
+}
+
+model ProjectTemplate {
+  id          String   @id @default(cuid())
+  name        String
+  description String
+  title       String
+  expertIds   String
+  phase       String   @default("diverge")
+  isBuiltin   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isBuiltin])
+}
+
+/// P2-3: 专家长期记忆 — 跨项目积累专家洞察/偏好/经验教训
+model ExpertMemory {
+  id        String   @id @default(cuid())
+  expertId  String
+  projectId String
+  content   String
+  embedding String?
+  category  String   @default("insight") // insight | preference | lesson_learned
+  createdAt DateTime @default(now())
+
+  @@index([expertId])
+  @@index([expertId, projectId])
   @@index([projectId])
 }

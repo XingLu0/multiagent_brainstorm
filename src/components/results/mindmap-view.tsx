@@ -1,8 +1,8 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { Transformer } from "markmap-lib";
-import { Markmap } from "markmap-view";
+import type { Transformer } from "markmap-lib";
+import type { Markmap } from "markmap-view";
 import { parseSSEStream } from "@/lib/sse";
 import { fetchWithConfig } from "@/lib/client-config";
 
@@ -11,11 +11,10 @@ interface MindmapViewProps {
   minutesContent: string;
 }
 
-const transformer = new Transformer();
-
 export function MindmapView({ projectId, minutesContent }: MindmapViewProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const markmapRef = useRef<Markmap | null>(null);
+  const transformerRef = useRef<Transformer | null>(null);
   const [markdown, setMarkdown] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,12 +23,26 @@ export function MindmapView({ projectId, minutesContent }: MindmapViewProps) {
   useEffect(() => {
     if (!svgRef.current || !markdown) return;
 
-    const { root } = transformer.transform(markdown);
-    if (!markmapRef.current) {
-      markmapRef.current = Markmap.create(svgRef.current);
-    }
-    markmapRef.current.setData(root);
-    markmapRef.current.fit();
+    (async () => {
+      // 动态加载 markmap 库（首次调用时）
+      if (!transformerRef.current) {
+        try {
+          const { Transformer: TransformerClass } = await import("markmap-lib");
+          transformerRef.current = new TransformerClass();
+        } catch {
+          setError("思维导图组件加载失败");
+          return;
+        }
+      }
+
+      const { root } = transformerRef.current.transform(markdown);
+      if (!markmapRef.current) {
+        const { Markmap: MarkmapClass } = await import("markmap-view");
+        markmapRef.current = MarkmapClass.create(svgRef.current);
+      }
+      markmapRef.current.setData(root);
+      markmapRef.current.fit();
+    })();
   }, [markdown]);
 
   // 清理
@@ -46,7 +59,7 @@ export function MindmapView({ projectId, minutesContent }: MindmapViewProps) {
     setMarkdown("");
 
     try {
-      const res = await fetchWithConfig(`/api/sessions/${projectId}/mindmap`, {
+      const res = await fetchWithConfig(`/api/v1/sessions/${projectId}/mindmap`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),

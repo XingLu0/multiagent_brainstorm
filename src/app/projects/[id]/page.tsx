@@ -3,9 +3,9 @@
 import React, { useState, useEffect, useCallback, useRef, use, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { ChatStream, type ChatMessage } from "@/components/chat/chat-stream";
 import { InputBar, type Attachment } from "@/components/chat/input-bar";
-import { DiscussionDashboard } from "@/components/dashboard/discussion-dashboard";
 import { ExpertPicker } from "@/components/project/expert-picker";
 import { parseSSEStream } from "@/lib/sse";
 import { fetchWithConfig } from "@/lib/client-config";
@@ -17,6 +17,15 @@ import {
   type DiscussionState,
 } from "@/lib/engine/discussion-state";
 import { useExperts } from "@/lib/hooks/use-experts";
+
+// 懒加载 DiscussionDashboard（减少首屏 JS bundle 体积）
+const DiscussionDashboard = dynamic(
+  () => import("@/components/dashboard/discussion-dashboard").then(m => ({ default: m.DiscussionDashboard })),
+  {
+    ssr: false,
+    loading: () => <div className="h-16 animate-pulse rounded-lg bg-gray-100" />,
+  }
+);
 
 interface ChatPageProps {
   params: Promise<{ id: string }>;
@@ -107,6 +116,7 @@ export default function ChatPage({ params }: ChatPageProps) {
   >("idle");
   const [searchStatus, setSearchStatus] = useState<string | null>(null);
   const [isPaused, setIsPaused] = useState(false);
+  const [isSoftStopping, setIsSoftStopping] = useState(false);
   const [pauseRemainingTurns, setPauseRemainingTurns] = useState<number | undefined>(undefined);
   const pausedRef = useRef(false);
   // 动态专家管理：邀请/移除专家模态框与主持人建议专家
@@ -155,7 +165,7 @@ export default function ChatPage({ params }: ChatPageProps) {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const projectRes = await fetch(`/api/projects/${id}`);
+        const projectRes = await fetch(`/api/v1/projects/${id}`);
 
         if (!projectRes.ok) {
           if (projectRes.status === 404) {
@@ -277,7 +287,7 @@ export default function ChatPage({ params }: ChatPageProps) {
   // Reload messages from DB to sync frontend state with actual persisted data
   const reloadMessagesFromDB = useCallback(async () => {
     try {
-      const res = await fetch(`/api/projects/${id}`);
+      const res = await fetch(`/api/v1/projects/${id}`);
       if (!res.ok) return;
       const data = await res.json();
       if (data.messages) {
@@ -422,6 +432,13 @@ export default function ChatPage({ params }: ChatPageProps) {
         setToast(`${errorPrefix}: ${data.message}`);
         reloadMessagesFromDB();
       },
+      onStopping: () => {
+        setIsSoftStopping(true);
+        setToast("正在等待当前专家收尾...");
+      },
+      onSoftStop: () => {
+        // 软停止完成，done 事件会紧随其后
+      },
     }),
     [handleStreamChunk, reloadMessagesFromDB, projectExperts, finalizeDashboard]
   );
@@ -442,7 +459,7 @@ export default function ChatPage({ params }: ChatPageProps) {
 
       let streamStarted = false;
       try {
-        const response = await fetchWithConfig(`/api/sessions/${id}/message`, {
+        const response = await fetchWithConfig(`/api/v1/sessions/${id}/message`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content, attachments }),
@@ -469,6 +486,7 @@ export default function ChatPage({ params }: ChatPageProps) {
         }
       } finally {
         setIsTyping(false);
+        setIsSoftStopping(false);
         setSearchStatus(null);
         abortRef.current = null;
         if (pausedRef.current) setIsPaused(true);
@@ -499,7 +517,7 @@ export default function ChatPage({ params }: ChatPageProps) {
 
       try {
         const response = await fetchWithConfig(
-          `/api/sessions/${id}/intervene`,
+          `/api/v1/sessions/${id}/intervene`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -530,8 +548,19 @@ export default function ChatPage({ params }: ChatPageProps) {
       abortRef.current.abort();
       abortRef.current = null;
       setIsTyping(false);
+      setIsSoftStopping(false);
     }
   }, []);
+
+  // 软停止：让当前专家说完，不开启下一轮
+  const handleSoftStop = useCallback(async () => {
+    try {
+      await fetchWithConfig(`/api/v1/sessions/${id}/soft-stop`, { method: "POST" });
+      // isSoftStopping 状态由 SSE stopping 事件设置
+    } catch {
+      // 静默失败，用户可重试或使用强制停止
+    }
+  }, [id]);
 
   // 继续被暂停的专家讨论（可选附带用户补充输入）
   const handleContinue = useCallback(
@@ -554,7 +583,7 @@ export default function ChatPage({ params }: ChatPageProps) {
 
       let streamStarted = false;
       try {
-        const response = await fetchWithConfig(`/api/sessions/${id}/continue`, {
+        const response = await fetchWithConfig(`/api/v1/sessions/${id}/continue`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ userInput }),
@@ -581,6 +610,7 @@ export default function ChatPage({ params }: ChatPageProps) {
         }
       } finally {
         setIsTyping(false);
+        setIsSoftStopping(false);
         setSearchStatus(null);
         abortRef.current = null;
         if (pausedRef.current) setIsPaused(true);
@@ -597,7 +627,7 @@ export default function ChatPage({ params }: ChatPageProps) {
     // Reload from DB to sync frontend state and find the last user message
     let lastUserMsg: ChatMessage | undefined;
     try {
-      const res = await fetch(`/api/projects/${id}`);
+      const res = await fetch(`/api/v1/projects/${id}`);
       if (res.ok) {
         const data = await res.json();
         if (data.messages) {
@@ -638,7 +668,7 @@ export default function ChatPage({ params }: ChatPageProps) {
     let streamStarted = false;
     try {
       const response = await fetchWithConfig(
-        `/api/sessions/${id}/edit-message`,
+        `/api/v1/sessions/${id}/edit-message`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -667,6 +697,7 @@ export default function ChatPage({ params }: ChatPageProps) {
       }
     } finally {
       setIsTyping(false);
+      setIsSoftStopping(false);
       setSearchStatus(null);
       abortRef.current = null;
       if (!pausedRef.current) finalizeDashboard("idle");
@@ -700,7 +731,7 @@ export default function ChatPage({ params }: ChatPageProps) {
       let streamStarted = false;
       try {
         const response = await fetchWithConfig(
-          `/api/sessions/${id}/edit-message`,
+          `/api/v1/sessions/${id}/edit-message`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -729,6 +760,7 @@ export default function ChatPage({ params }: ChatPageProps) {
         }
       } finally {
         setIsTyping(false);
+        setIsSoftStopping(false);
         setSearchStatus(null);
         abortRef.current = null;
         if (!pausedRef.current) finalizeDashboard("idle");
@@ -747,7 +779,7 @@ export default function ChatPage({ params }: ChatPageProps) {
     abortRef.current = controller;
 
     try {
-      const response = await fetchWithConfig(`/api/sessions/${id}/summarize`, {
+      const response = await fetchWithConfig(`/api/v1/sessions/${id}/summarize`, {
         method: "POST",
         signal: controller.signal,
       });
@@ -776,6 +808,7 @@ export default function ChatPage({ params }: ChatPageProps) {
       }
     } finally {
       setIsTyping(false);
+      setIsSoftStopping(false);
       abortRef.current = null;
       finalizeDashboard("idle");
     }
@@ -792,7 +825,7 @@ export default function ChatPage({ params }: ChatPageProps) {
     endAbortRef.current = controller;
 
     try {
-      const response = await fetchWithConfig(`/api/sessions/${id}/end`, {
+      const response = await fetchWithConfig(`/api/v1/sessions/${id}/end`, {
         method: "POST",
         signal: controller.signal,
       });
@@ -846,7 +879,7 @@ export default function ChatPage({ params }: ChatPageProps) {
   const handleEnterConverge = useCallback(async () => {
     if (!project || isTyping) return;
     try {
-      const res = await fetchWithConfig(`/api/sessions/${id}/phase`, {
+      const res = await fetchWithConfig(`/api/v1/sessions/${id}/phase`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phase: "converge" }),
@@ -868,7 +901,7 @@ export default function ChatPage({ params }: ChatPageProps) {
   const handleTestConnection = useCallback(async () => {
     setConnectionStatus("testing");
     try {
-      const res = await fetchWithConfig("/api/test-connection");
+      const res = await fetchWithConfig("/api/v1/test-connection");
       const data = await res.json();
       if (data.success) {
         setConnectionStatus("success");
@@ -1106,6 +1139,7 @@ export default function ChatPage({ params }: ChatPageProps) {
         searchStatus={searchStatus}
         onEditMessage={handleEditMessage}
         disabled={isTyping || isEnding}
+        isSoftStopping={isSoftStopping}
       />
 
       {/* Error message with retry */}
@@ -1150,9 +1184,11 @@ export default function ChatPage({ params }: ChatPageProps) {
             onSend={handleSend}
             onSummarize={handleSummarize}
             onStop={handleStop}
+            onSoftStop={handleSoftStop}
             onContinue={handleContinue}
             onIntervene={handleIntervene}
             isPaused={isPaused}
+            isSoftStopping={isSoftStopping}
             disabled={isTyping || isEnding}
             placeholder="输入你的想法，按 Enter 发送...（输入 / 可干预讨论方向）"
           />
@@ -1278,7 +1314,7 @@ export default function ChatPage({ params }: ChatPageProps) {
                 if (newId) {
                   try {
                     const res = await fetchWithConfig(
-                      `/api/sessions/${id}/experts`,
+                      `/api/v1/sessions/${id}/experts`,
                       {
                         method: "PATCH",
                         headers: { "Content-Type": "application/json" },
@@ -1310,7 +1346,7 @@ export default function ChatPage({ params }: ChatPageProps) {
                 } else if (removedId) {
                   try {
                     const res = await fetchWithConfig(
-                      `/api/sessions/${id}/experts`,
+                      `/api/v1/sessions/${id}/experts`,
                       {
                         method: "PATCH",
                         headers: { "Content-Type": "application/json" },

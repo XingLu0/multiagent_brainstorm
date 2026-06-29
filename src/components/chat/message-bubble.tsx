@@ -13,6 +13,7 @@ interface MessageBubbleProps {
   messageId?: string;
   onEdit?: (id: string, content: string) => void;
   editable?: boolean;
+  isStopping?: boolean;
 }
 
 /**
@@ -29,6 +30,7 @@ export function MessageBubble({
   messageId,
   onEdit,
   editable = false,
+  isStopping = false,
 }: MessageBubbleProps) {
   const { experts } = useExperts();
   const [isEditing, setIsEditing] = useState(false);
@@ -185,6 +187,12 @@ export function MessageBubble({
             className={`rounded-2xl rounded-bl-sm border bg-white px-4 py-2 shadow-sm ${colors.bubble} text-gray-800`}
           >
             <HookHighlight content={content} />
+            {isStopping && (
+              <div className="mt-1.5 flex items-center gap-1 text-xs text-gray-400">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-gray-400"></span>
+                <span>即将结束</span>
+              </div>
+            )}
           </div>
         </div>
       </div>

@@ -7,8 +7,12 @@ export function buildExpertSystemPrompt(
   },
   currentDate: string,
   requireHook: boolean = true,
-  phase: "diverge" | "converge" = "diverge"
+  phase: "diverge" | "converge" = "diverge",
+  language: "zh" | "en" = "zh"
 ): string {
+  const languageInstruction = language === "en"
+    ? "\n\nIMPORTANT: You must respond in English. All your analysis, arguments, and the [HOOK] question must be in English."
+    : "";
   const hookRules = requireHook
     ? `4. **必须以钩子结尾**：回复的最后一段必须是一个向用户提问的问句，用于交还话语权、激发用户进一步思考。格式为：[HOOK] 你的问句内容
 
@@ -45,7 +49,7 @@ ${hookRules}
 5. **工具使用规范**：你可以使用工具获取信息（如搜索、查看时间），但绝对不要在发言中提及工具的使用过程或原因。直接给出分析结果，就像你本来就知道这些信息。模拟正式的科技公司脑暴环境，保持专业。
 6. **搜索效率与多维度搜索**：搜索不超过2次，聚焦获取最关键信息。如果上下文中已有其他专家的搜索发现，优先参考已有结果，避免重复搜索。在回复中明确引用搜索到的关键数据或事实。如果问题有多个方面需要调研，应一次性传入多个关键词并行搜索（如 queries: ['方案A 性能', '方案B 性能', '方案A vs 方案B 对比']），而非分多次调用。
 7. **共享知识库引用**：上下文中的【共享知识库】段落记录了讨论中已确立的共识、决策、分歧和关键事实。发言前请先确认你的观点是否与已有共识或决策冲突——如果冲突，需显式说明推翻理由；如果已有相关事实，可直接引用而无需重复搜索。
-8. **讨论阶段要求**：${phase === "diverge" ? "当前处于发散阶段，须围绕拓宽思路展开，提出多种可能性。" : "当前处于收敛阶段，须围绕收敛共识展开，明确支持或反对已有方案。"}`;
+8. **讨论阶段要求**：${phase === "diverge" ? "当前处于发散阶段，须围绕拓宽思路展开，提出多种可能性。" : "当前处于收敛阶段，须围绕收敛共识展开，明确支持或反对已有方案。"}${languageInstruction}`;
 }
 
 export function buildExpertUserPrompt(

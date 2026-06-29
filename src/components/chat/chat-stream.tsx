@@ -21,6 +21,7 @@ interface ChatStreamProps {
   searchStatus?: string | null;
   onEditMessage?: (id: string, content: string) => void;
   disabled?: boolean;
+  isSoftStopping?: boolean;
 }
 
 /**
@@ -34,6 +35,7 @@ export function ChatStream({
   searchStatus,
   onEditMessage,
   disabled = false,
+  isSoftStopping = false,
 }: ChatStreamProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -44,7 +46,7 @@ export function ChatStream({
   return (
     <div className="flex-1 overflow-y-auto px-4 py-6">
       <div className="mx-auto max-w-3xl space-y-4">
-        {messages.map((message) => {
+        {messages.map((message, index) => {
           if (message.role === "summary" || message.role === "pause") {
             return <SummaryCard key={message.id} content={message.content} label={message.role === "pause" ? "中场总结" : undefined} />;
           }
@@ -82,6 +84,7 @@ export function ChatStream({
               messageId={message.id}
               onEdit={onEditMessage}
               editable={!disabled && message.role === "user"}
+              isStopping={isSoftStopping && isTyping && typingRole?.role === "expert" && message.role.startsWith("expert:") && index === messages.length - 1}
             />
           );
         })}

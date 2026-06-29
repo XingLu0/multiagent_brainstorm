@@ -10,7 +10,9 @@ export type SSEEventType =
   | "done"
   | "ping"
   | "tool_call"
-  | "pause";
+  | "pause"
+  | "stopping"
+  | "soft_stop";
 
 export type SSESendFn = (event: SSEEventType, data: Record<string, unknown>) => void;
 
@@ -62,6 +64,8 @@ export async function parseSSEStream(
     onDone?: (data: Record<string, unknown>) => void;
     onToolCall?: (data: { expertId: string | null; toolName: string; input: unknown }) => void;
     onPause?: (data: { content: string; remainingTurns?: number }) => void;
+    onStopping?: (data: Record<string, unknown>) => void;
+    onSoftStop?: (data: Record<string, unknown>) => void;
   }
 ): Promise<void> {
   const reader = response.body?.getReader();
@@ -114,6 +118,12 @@ export async function parseSSEStream(
             break;
           case "pause":
             handlers.onPause?.(data);
+            break;
+          case "stopping":
+            handlers.onStopping?.(data);
+            break;
+          case "soft_stop":
+            handlers.onSoftStop?.(data);
             break;
           case "done":
             handlers.onDone?.(data);

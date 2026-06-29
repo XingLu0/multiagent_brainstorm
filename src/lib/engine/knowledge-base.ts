@@ -1,6 +1,10 @@
-import { generateText, type LanguageModel } from "ai";
+import { generateText, embedMany, type LanguageModel, type EmbeddingModel } from "ai";
 import { prisma } from "@/lib/prisma";
 import { DEFAULT_CALL_SETTINGS } from "@/lib/llm";
+import { incrementKnowledgeVersion, promptCache } from "./prompt-cache";
+import { retrieveTopK } from "./vector-store";
+import { getExpertById } from "@/lib/experts/definitions";
+import { extractMemoryFromDiscussion, generateMemoryEmbeddings } from "./expert-memory";
 
 /**
  * 知识条目类别
@@ -106,13 +110,14 @@ export async function extractKnowledge(
 
 /**
  * 将提取的知识条目保存到数据库
+ * @returns 新增条目数（去重后实际写入的数量）
  */
 export async function saveKnowledgeEntries(
   projectId: string,
   entries: ExtractedEntry[],
   sourceMessageId?: string
-): Promise<void> {
-  if (entries.length === 0) return;
+): Promise<number> {
+  if (entries.length === 0) return 0;
 
   // 查询已有条目，避免重复
   const existing = await prisma.knowledgeEntry.findMany({
@@ -125,7 +130,7 @@ export async function saveKnowledgeEntries(
     (e) => !existingContents.has(e.content)
   );
 
-  if (newEntries.length === 0) return;
+  if (newEntries.length === 0) return 0;
 
   await prisma.knowledgeEntry.createMany({
     data: newEntries.map((e) => ({
@@ -135,6 +140,26 @@ export async function saveKnowledgeEntries(
       sourceMessageId: sourceMessageId ?? null,
     })),
   });
+
+  return newEntries.length;
+}
+
+/**
+ * P2-1: 查询项目的共识/分歧知识条目数
+ * 用于状态机动态总结触发条件判断
+ */
+export async function getKnowledgeCounts(
+  projectId: string
+): Promise<{ consensus: number; divergence: number }> {
+  const [consensus, divergence] = await Promise.all([
+    prisma.knowledgeEntry.count({
+      where: { projectId, category: "consensus" },
+    }),
+    prisma.knowledgeEntry.count({
+      where: { projectId, category: "divergence" },
+    }),
+  ]);
+  return { consensus, divergence };
 }
 
 /**
@@ -179,15 +204,154 @@ export async function queryKnowledge(projectId: string): Promise<string> {
 }
 
 /**
+ * P2-2: 为项目中缺少 embedding 的知识条目批量生成向量
+ * 使用 AI SDK embedMany 批量生成
+ */
+export async function generateEmbeddings(
+  projectId: string,
+  embeddingModel: EmbeddingModel
+): Promise<number> {
+  const entries = await prisma.knowledgeEntry.findMany({
+    where: { projectId, embedding: null },
+    select: { id: true, content: true },
+  });
+
+  if (entries.length === 0) return 0;
+
+  try {
+    const result = await embedMany({
+      model: embeddingModel,
+      values: entries.map((e) => e.content),
+    });
+
+    // 逐条更新 embedding
+    await Promise.all(
+      entries.map((entry, i) =>
+        prisma.knowledgeEntry.update({
+          where: { id: entry.id },
+          data: { embedding: JSON.stringify(result.embeddings[i]) },
+        })
+      )
+    );
+
+    return entries.length;
+  } catch (error) {
+    // DEF-03: 记录 embedding 生成失败原因，便于诊断
+    console.error("[generateEmbeddings] embedding 生成失败，将降级为全量知识检索:", error instanceof Error ? error.message : String(error));
+    return 0;
+  }
+}
+
+/**
+ * P2-2: 语义检索知识条目
+ * 使用 embedding 向量进行 top-K 相似度检索，格式化为摘要字符串
+ *
+ * 降级策略：embedding 生成失败时回退到 queryKnowledge 全量 dump
+ */
+export async function queryKnowledgeSemantic(
+  projectId: string,
+  queryText: string,
+  embeddingModel: EmbeddingModel
+): Promise<string> {
+  try {
+    // 生成查询向量
+    const queryResult = await embedMany({
+      model: embeddingModel,
+      values: [queryText.slice(0, 500)],
+    });
+    const queryVector = queryResult.embeddings[0];
+
+    // 加载所有有 embedding 的知识条目
+    const entries = await prisma.knowledgeEntry.findMany({
+      where: { projectId, embedding: { not: null } },
+      select: { id: true, category: true, content: true, embedding: true },
+    });
+
+    if (entries.length === 0) {
+      // 没有 embedding 条目，降级为全量 dump
+      return queryKnowledge(projectId);
+    }
+
+    const results = retrieveTopK(
+      entries.map((e) => ({
+        id: e.id,
+        category: e.category,
+        content: e.content,
+        embedding: e.embedding,
+      })),
+      queryVector
+    );
+
+    if (results.length === 0) {
+      // 语义检索无结果，降级为全量 dump
+      return queryKnowledge(projectId);
+    }
+
+    const categoryLabels: Record<string, string> = {
+      decision: "决策",
+      consensus: "共识",
+      divergence: "分歧",
+      fact: "事实",
+      open_question: "待解问题",
+    };
+
+    const lines = results.map((r) => {
+      const label = categoryLabels[r.category] ?? r.category;
+      return `【${label}】${r.content}`;
+    });
+
+    return lines.join("\n");
+  } catch (error) {
+    // DEF-03: 记录语义检索失败，降级为全量 dump
+    console.error("[queryKnowledgeSemantic] 语义检索失败，降级为全量知识检索:", error instanceof Error ? error.message : String(error));
+    return queryKnowledge(projectId);
+  }
+}
+
+/**
  * 一站式：提取 + 保存知识条目
  * 在每轮专家讨论后调用，不阻塞流式输出
+ * P0-5: 有新知识入库时递增版本号并失效 prompt 缓存
  */
 export async function extractAndSaveKnowledge(
   model: LanguageModel,
   projectId: string,
   context: string,
-  abortSignal?: AbortSignal
+  abortSignal?: AbortSignal,
+  embeddingModel?: EmbeddingModel,
+  expertIds?: string[]
 ): Promise<void> {
   const entries = await extractKnowledge(model, context, abortSignal);
-  await saveKnowledgeEntries(projectId, entries);
+  const savedCount = await saveKnowledgeEntries(projectId, entries);
+
+  // P0-5: 有新知识入库时，递增版本号并失效该项目缓存
+  if (savedCount > 0) {
+    incrementKnowledgeVersion(projectId);
+    promptCache.invalidateProject(projectId);
+
+    // P2-2: 有新知识时同步生成 embedding（如果提供了 embeddingModel）
+    if (embeddingModel) {
+      await generateEmbeddings(projectId, embeddingModel);
+    }
+  }
+
+  // P2-3: 为每位发言专家提取长期记忆
+  if (expertIds && expertIds.length > 0) {
+    for (const expertId of expertIds) {
+      try {
+        const expert = await getExpertById(expertId);
+        if (expert) {
+          const memoryCount = await extractMemoryFromDiscussion(
+            model, expertId, expert.name, context, projectId, abortSignal
+          );
+          // 有新记忆时生成 embedding
+          if (memoryCount > 0 && embeddingModel) {
+            await generateMemoryEmbeddings(expertId, embeddingModel);
+          }
+        }
+      } catch {
+        // 记忆提取失败不影响主流程
+      }
+    }
+  }
 }

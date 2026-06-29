@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { MarkdownViewer } from "@/components/results/markdown-viewer";
 import { DocGenerator } from "@/components/results/doc-generator";
-import { MindmapView } from "@/components/results/mindmap-view";
+import { MindmapViewLazy } from "@/components/results/mindmap-view-lazy";
 import { DOC_TYPE_LABELS } from "@/lib/engine/doc-types";
 import type { DocumentType } from "@/lib/engine/doc-types";
 
@@ -58,12 +58,37 @@ export default async function ResultsPage({ params }: ResultsPageProps) {
             </svg>
             返回脑暴
           </Link>
-          <h1 className="text-2xl font-bold text-gray-900">
-            {project.title}
-          </h1>
-          <p className="mt-1 text-sm text-gray-500">
-            脑暴纪要与文档生成
-          </p>
+          <div className="flex items-start justify-between">
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">
+                {project.title}
+              </h1>
+              <p className="mt-1 text-sm text-gray-500">
+                脑暴纪要与文档生成
+              </p>
+            </div>
+            {/* 导出按钮组 */}
+            <div className="flex shrink-0 gap-2">
+              <a
+                href={`/api/v1/sessions/${id}/export?format=json`}
+                className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
+              >
+                导出 JSON
+              </a>
+              <a
+                href={`/api/v1/sessions/${id}/export?format=markdown`}
+                className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
+              >
+                导出 Markdown
+              </a>
+              <a
+                href={`/api/v1/sessions/${id}/export?format=text`}
+                className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
+              >
+                导出 TXT
+              </a>
+            </div>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -132,7 +157,7 @@ export default async function ResultsPage({ params }: ResultsPageProps) {
         {/* 思维导图区域 */}
         <div className="mt-6 space-y-3">
           <h2 className="text-lg font-semibold text-gray-900">思维导图</h2>
-          <MindmapView projectId={id} minutesContent={minutes?.content ?? ""} />
+          <MindmapViewLazy projectId={id} minutesContent={minutes?.content ?? ""} />
         </div>
       </div>
     </main>

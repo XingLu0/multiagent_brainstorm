@@ -1,0 +1,78 @@
+{
+  "common": {
+    "cancel": "Cancel",
+    "save": "Save",
+    "loading": "Loading...",
+    "error": "Error",
+    "confirm": "Confirm",
+    "delete": "Delete",
+    "edit": "Edit",
+    "back": "Back",
+    "close": "Close",
+    "send": "Send",
+    "copy": "Copy",
+    "download": "Download"
+  },
+  "home": {
+    "title": "AI Brainstorm",
+    "subtitle": "Multi-expert collaborative AI brainstorming platform",
+    "newProject": "New Brainstorm",
+    "recentProjects": "Recent Projects",
+    "noProjects": "No projects yet. Click the button above to start.",
+    "settings": "Settings",
+    "experts": "Expert Management"
+  },
+  "project": {
+    "newTitle": "New Brainstorm",
+    "titlePlaceholder": "e.g., How to design a user growth strategy...",
+    "descriptionPlaceholder": "Additional description (optional)",
+    "selectExperts": "Select Expert Team",
+    "selectedCount": "{count} selected (min 2)",
+    "startBrainstorm": "Start Brainstorm",
+    "templates": "Templates",
+    "noTemplate": "Start from scratch"
+  },
+  "chat": {
+    "inputPlaceholder": "Type a message...",
+    "softStop": "Soft Stop",
+    "forceStop": "Force Stop",
+    "continueDiscussion": "Continue Discussion",
+    "summary": "Summary",
+    "pause": "Pause",
+    "replay": "Replay",
+    "undo": "Undo",
+    "redo": "Redo",
+    "phaseTransition": "Enter Convergence Phase"
+  },
+  "settings": {
+    "title": "Settings",
+    "apiKey": "API Key",
+    "baseUrl": "API URL",
+    "model": "Model Name",
+    "provider": "LLM Provider",
+    "searchApiKey": "Search API Key",
+    "save": "Save Settings",
+    "saved": "Settings saved"
+  },
+  "experts": {
+    "title": "Expert Management",
+    "addExpert": "Add Expert",
+    "name": "Expert Name",
+    "focus": "Focus Area",
+    "persona": "Persona Description",
+    "builtin": "Built-in",
+    "custom": "Custom"
+  },
+  "results": {
+    "title": "Discussion Results",
+    "summary": "Summary",
+    "documents": "Documents",
+    "mindmap": "Mind Map",
+    "export": "Export",
+    "visualization": "Visualization",
+    "timeline": "Timeline",
+    "wordcloud": "Word Cloud",
+    "controversy": "Controversy Matrix",
+    "heatmap": "Heat Map"
+  }
+}

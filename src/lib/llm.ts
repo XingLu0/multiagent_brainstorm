@@ -1,5 +1,6 @@
+import type { LanguageModel, EmbeddingModel } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
-import type { LanguageModel } from "ai";
+import { ProviderRegistry } from "@/lib/providers/registry";
 
 /**
  * LLM 配置接口
@@ -11,6 +12,12 @@ export interface LLMConfig {
   maxTokens: number;
   temperature: number;
   searchApiKey: string;
+  /** Provider 类型，默认 "openai-compatible" */
+  providerType?: string;
+  /** DEF-03: 独立的 Embedding 端点配置 */
+  embeddingBaseURL?: string;
+  embeddingApiKey?: string;
+  embeddingModel?: string;
 }
 
 /**
@@ -19,13 +26,18 @@ export interface LLMConfig {
 export function resolveLLMConfig(
   userConfig?: Partial<LLMConfig>
 ): LLMConfig {
+  const providerType =
+    process.env.LLM_PROVIDER || userConfig?.providerType || "openai-compatible";
+
+  const isOllama = providerType === "ollama";
+
   return {
-    apiKey:
-      process.env.LLM_API_KEY || userConfig?.apiKey || "",
-    baseURL:
-      process.env.LLM_BASE_URL ||
-      userConfig?.baseURL ||
-      "https://api.openai.com/v1",
+    apiKey: isOllama
+      ? (process.env.LLM_API_KEY || userConfig?.apiKey || "ollama")
+      : (process.env.LLM_API_KEY || userConfig?.apiKey || ""),
+    baseURL: isOllama
+      ? (process.env.LLM_BASE_URL || userConfig?.baseURL || "http://localhost:11434/v1")
+      : (process.env.LLM_BASE_URL || userConfig?.baseURL || "https://api.openai.com/v1"),
     model:
       process.env.LLM_MODEL || userConfig?.model || "gpt-4o-mini",
     maxTokens:
@@ -38,6 +50,13 @@ export function resolveLLMConfig(
       0.7,
     searchApiKey:
       process.env.TAVILY_API_KEY || userConfig?.searchApiKey || "",
+    providerType,
+    embeddingBaseURL:
+      process.env.EMBEDDING_BASE_URL || userConfig?.embeddingBaseURL || undefined,
+    embeddingApiKey:
+      process.env.EMBEDDING_API_KEY || userConfig?.embeddingApiKey || undefined,
+    embeddingModel:
+      process.env.EMBEDDING_MODEL || userConfig?.embeddingModel || "text-embedding-3-small",
   };
 }
 
@@ -60,44 +79,23 @@ export const EXPERT_CALL_SETTINGS = {
 
 /**
  * 创建 LLM 模型实例（工厂函数）
- * 封装 createOpenAI + 自定义 fetch 中间件
+ * 委托给 ProviderRegistry，按 providerType 分发到对应 Provider 工厂
  */
 export function createLLMModel(config: LLMConfig): LanguageModel {
-  const openai = createOpenAI({
-    baseURL: config.baseURL,
-    apiKey: config.apiKey,
-    fetch: async (input, init) => {
-      let finalInit = init;
-      if (init?.method === "POST" && typeof init.body === "string") {
-        try {
-          const body = JSON.parse(init.body);
+  return ProviderRegistry.create(config);
+}
 
-          // 仅对 DeepSeek V4 系列模型注入 enable_thinking=false
-          if (
-            typeof body.model === "string" &&
-            body.model.startsWith("deepseek-v4")
-          ) {
-            body.enable_thinking = false;
-            finalInit = { ...init, body: JSON.stringify(body) };
-          }
-
-          // 为 MiMo 模型关闭深度思考（Thinking Mode）
-          // 多轮工具调用时要求回传 reasoning_content，AI SDK 不回传会导致 400 错误
-          if (
-            typeof body.model === "string" &&
-            body.model.startsWith("mimo-")
-          ) {
-            body.thinking = { type: "disabled" };
-            finalInit = { ...init, body: JSON.stringify(body) };
-          }
-        } catch {
-          // JSON 解析失败，原样转发请求
-        }
-      }
-      return fetch(input, finalInit);
-    },
-  });
-
-  // 使用 .chat() 强制 Chat Completions API
-  return openai.chat(config.model);
+/**
+ * P2-2: 创建 Embedding 模型实例
+ * DEF-03: 支持独立的 embedding 端点配置，fallback 到聊天 LLM 配置
+ *
+ * 当 embeddingBaseURL/embeddingApiKey 配置时使用独立端点，
+ * 否则 fallback 到聊天 LLM 的 baseURL/apiKey（可能不支持 embeddings）。
+ */
+export function createEmbeddingModel(config: LLMConfig): EmbeddingModel {
+  const baseURL = config.embeddingBaseURL || config.baseURL;
+  const apiKey = config.embeddingApiKey || config.apiKey;
+  const modelName = config.embeddingModel || "text-embedding-3-small";
+  const openai = createOpenAI({ baseURL, apiKey });
+  return openai.embedding(modelName);
 }

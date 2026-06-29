@@ -11,6 +11,12 @@ export interface ClientLLMConfig {
   maxTokens?: number;
   temperature?: number;
   searchApiKey?: string;
+  /** Provider 类型，默认 "openai-compatible" */
+  providerType?: string;
+  /** DEF-03: 独立的 Embedding 端点配置 */
+  embeddingBaseURL?: string;
+  embeddingApiKey?: string;
+  embeddingModel?: string;
 }
 
 const STORAGE_KEY = "ai-brainstorm-llm-config";

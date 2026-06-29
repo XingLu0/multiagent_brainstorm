@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
@@ -18,6 +18,14 @@ export default function SettingsPage() {
   const [maxTokens, setMaxTokens] = useState(initialConfig.maxTokens?.toString() ?? "");
   const [temperature, setTemperature] = useState(initialConfig.temperature?.toString() ?? "");
   const [searchApiKey, setSearchApiKey] = useState(initialConfig.searchApiKey ?? "");
+  const [providerType, setProviderType] = useState(initialConfig.providerType ?? "openai-compatible");
+
+  // DEF-03: Embedding 独立配置
+  const [embeddingBaseURL, setEmbeddingBaseURL] = useState(initialConfig.embeddingBaseURL ?? "");
+  const [embeddingApiKey, setEmbeddingApiKey] = useState(initialConfig.embeddingApiKey ?? "");
+  const [embeddingModel, setEmbeddingModel] = useState(initialConfig.embeddingModel ?? "");
+  const [showEmbeddingConfig, setShowEmbeddingConfig] = useState(false);
+  const [showEmbeddingKey, setShowEmbeddingKey] = useState(false);
 
   const [showApiKey, setShowApiKey] = useState(false);
   const [showSearchKey, setShowSearchKey] = useState(false);
@@ -27,6 +35,34 @@ export default function SettingsPage() {
     "idle" | "testing" | "success" | "failed"
   >("idle");
   const [connectionMessage, setConnectionMessage] = useState("");
+
+  // LLM 调用统计
+  const [llmStats, setLlmStats] = useState<{
+    totalCalls: number;
+    successCount: number;
+    failedCount: number;
+    successRate: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    avgDurationMs: number;
+    recentCalls: {
+      id: string;
+      model: string;
+      inputTokens: number | null;
+      outputTokens: number | null;
+      durationMs: number;
+      success: boolean;
+      errorMessage: string | null;
+      createdAt: string;
+    }[];
+  } | null>(null);
+
+  useEffect(() => {
+    fetchWithConfig("/api/v1/llm-stats")
+      .then((res) => res.json())
+      .then((data) => setLlmStats(data))
+      .catch(() => {});
+  }, []);
 
   // Toast auto-dismiss
   useEffect(() => {
@@ -50,8 +86,13 @@ export default function SettingsPage() {
       if (!isNaN(t) && t >= 0 && t <= 2) config.temperature = t;
     }
     if (searchApiKey.trim()) config.searchApiKey = searchApiKey.trim();
+    if (providerType) config.providerType = providerType;
+    // DEF-03: Embedding 配置
+    if (embeddingBaseURL.trim()) config.embeddingBaseURL = embeddingBaseURL.trim();
+    if (embeddingApiKey.trim()) config.embeddingApiKey = embeddingApiKey.trim();
+    if (embeddingModel.trim()) config.embeddingModel = embeddingModel.trim();
     return config;
-  }, [apiKey, baseURL, model, maxTokens, temperature, searchApiKey]);
+  }, [apiKey, baseURL, model, maxTokens, temperature, searchApiKey, providerType, embeddingBaseURL, embeddingApiKey, embeddingModel]);
 
   const handleSave = useCallback(() => {
     const config = buildConfig();
@@ -67,7 +108,7 @@ export default function SettingsPage() {
     setConnectionStatus("testing");
     setConnectionMessage("");
     try {
-      const res = await fetchWithConfig("/api/test-connection");
+      const res = await fetchWithConfig("/api/v1/test-connection");
       const data = await res.json();
       if (data.success) {
         setConnectionStatus("success");
@@ -117,6 +158,35 @@ export default function SettingsPage() {
         </div>
 
         <form className="space-y-6" onSubmit={(e) => { e.preventDefault(); handleSave(); }}>
+          {/* Provider Type */}
+          <div>
+            <label htmlFor="providerType" className="mb-1 block text-sm font-medium text-gray-700">
+              LLM Provider
+            </label>
+            <select
+              id="providerType"
+              value={providerType}
+              onChange={(e) => {
+                const value = e.target.value;
+                setProviderType(value);
+                if (value === "ollama") {
+                  setBaseURL("http://localhost:11434/v1");
+                  setApiKey("ollama");
+                }
+              }}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none transition-colors focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            >
+              <option value="openai-compatible">OpenAI 兼容（DeepSeek / MiMo / 通义千问 等）</option>
+              <option value="anthropic" disabled>Anthropic（即将支持）</option>
+              <option value="ollama">Ollama（本地离线）</option>
+            </select>
+            <p className="mt-1 text-xs text-gray-400">
+              {providerType === "ollama"
+                ? "Ollama 模式无需 API Key。请确保本地已安装 Ollama 并运行模型（如 ollama run llama3.2）。默认地址：http://localhost:11434/v1"
+                : "选择 LLM 服务提供商。OpenAI 兼容模式支持所有遵循 OpenAI Chat Completions API 的服务。"}
+            </p>
+          </div>
+
           {/* LLM API Key */}
           <div>
             <label htmlFor="apiKey" className="mb-1 block text-sm font-medium text-gray-700">
@@ -128,8 +198,9 @@ export default function SettingsPage() {
                 type={showApiKey ? "text" : "password"}
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder="留空则使用环境变量 LLM_API_KEY"
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 pr-20 text-sm outline-none transition-colors focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                disabled={providerType === "ollama"}
+                placeholder={providerType === "ollama" ? "Ollama 无需 API Key" : "留空则使用环境变量 LLM_API_KEY"}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 pr-20 text-sm outline-none transition-colors focus:border-blue-500 focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-400"
                 autoComplete="off"
               />
               <button
@@ -253,6 +324,85 @@ export default function SettingsPage() {
             </p>
           </div>
 
+          {/* DEF-03: Embedding 配置（折叠式） */}
+          <div className="border-t border-gray-200 pt-4">
+            <button
+              type="button"
+              onClick={() => setShowEmbeddingConfig(!showEmbeddingConfig)}
+              className="flex w-full items-center justify-between text-left"
+            >
+              <span className="text-sm font-semibold text-gray-700">Embedding 向量嵌入配置（可选）</span>
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className={`h-4 w-4 text-gray-400 transition-transform ${showEmbeddingConfig ? "rotate-180" : ""}`}
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {showEmbeddingConfig && (
+              <div className="mt-3 space-y-4">
+                <p className="text-xs text-gray-400">
+                  配置独立的 Embedding 端点以启用 RAG 语义检索。留空则使用上方 LLM 配置（部分 Provider 如 MiMo 不支持 Embedding 端点，会导致 RAG 降级为全量检索）。
+                </p>
+                <div>
+                  <label htmlFor="embeddingBaseURL" className="mb-1 block text-sm font-medium text-gray-700">
+                    Embedding Base URL
+                  </label>
+                  <input
+                    id="embeddingBaseURL"
+                    type="text"
+                    value={embeddingBaseURL}
+                    onChange={(e) => setEmbeddingBaseURL(e.target.value)}
+                    placeholder="https://api.openai.com/v1（留空则使用 LLM Base URL）"
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none transition-colors focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    autoComplete="off"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="embeddingApiKey" className="mb-1 block text-sm font-medium text-gray-700">
+                    Embedding API Key
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="embeddingApiKey"
+                      type={showEmbeddingKey ? "text" : "password"}
+                      value={embeddingApiKey}
+                      onChange={(e) => setEmbeddingApiKey(e.target.value)}
+                      placeholder="留空则使用 LLM API Key"
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 pr-20 text-sm outline-none transition-colors focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                      autoComplete="off"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowEmbeddingKey(!showEmbeddingKey)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-gray-500 hover:text-gray-700"
+                    >
+                      {showEmbeddingKey ? "隐藏" : "显示"}
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label htmlFor="embeddingModel" className="mb-1 block text-sm font-medium text-gray-700">
+                    Embedding 模型名称
+                  </label>
+                  <input
+                    id="embeddingModel"
+                    type="text"
+                    value={embeddingModel}
+                    onChange={(e) => setEmbeddingModel(e.target.value)}
+                    placeholder="text-embedding-3-small（默认）"
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none transition-colors focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    autoComplete="off"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Connection test result */}
           {connectionStatus !== "idle" && (
             <div
@@ -306,6 +456,65 @@ export default function SettingsPage() {
           </div>
         </form>
       </div>
+
+      {/* LLM 调用统计 */}
+      {llmStats && llmStats.totalCalls > 0 && (
+        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+          <h2 className="mb-4 text-lg font-semibold text-gray-900">LLM 调用统计</h2>
+          <div className="mb-4 grid grid-cols-2 gap-4 md:grid-cols-4">
+            <div className="rounded-lg bg-gray-50 p-3">
+              <p className="text-xs text-gray-500">总调用数</p>
+              <p className="text-xl font-semibold text-gray-900">{llmStats.totalCalls}</p>
+            </div>
+            <div className="rounded-lg bg-gray-50 p-3">
+              <p className="text-xs text-gray-500">成功率</p>
+              <p className="text-xl font-semibold text-gray-900">{(llmStats.successRate * 100).toFixed(1)}%</p>
+            </div>
+            <div className="rounded-lg bg-gray-50 p-3">
+              <p className="text-xs text-gray-500">平均耗时</p>
+              <p className="text-xl font-semibold text-gray-900">{Math.round(llmStats.avgDurationMs)}ms</p>
+            </div>
+            <div className="rounded-lg bg-gray-50 p-3">
+              <p className="text-xs text-gray-500">总 Token</p>
+              <p className="text-xl font-semibold text-gray-900">{(llmStats.totalInputTokens + llmStats.totalOutputTokens).toLocaleString()}</p>
+            </div>
+          </div>
+          {llmStats.recentCalls.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b text-left text-gray-500">
+                    <th className="py-2 pr-4 font-medium">时间</th>
+                    <th className="py-2 pr-4 font-medium">模型</th>
+                    <th className="py-2 pr-4 font-medium">耗时</th>
+                    <th className="py-2 pr-4 font-medium">Token</th>
+                    <th className="py-2 pr-4 font-medium">状态</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {llmStats.recentCalls.slice(0, 10).map((call) => (
+                    <tr key={call.id} className="border-b border-gray-100">
+                      <td className="py-2 pr-4 text-gray-600">{new Date(call.createdAt).toLocaleString("zh-CN")}</td>
+                      <td className="py-2 pr-4 text-gray-600">{call.model}</td>
+                      <td className="py-2 pr-4 text-gray-600">{call.durationMs}ms</td>
+                      <td className="py-2 pr-4 text-gray-600">
+                        {(call.inputTokens ?? 0) + (call.outputTokens ?? 0)}
+                      </td>
+                      <td className="py-2 pr-4">
+                        {call.success ? (
+                          <span className="rounded bg-green-100 px-2 py-0.5 text-xs text-green-700">成功</span>
+                        ) : (
+                          <span className="rounded bg-red-100 px-2 py-0.5 text-xs text-red-700" title={call.errorMessage ?? ""}>失败</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Toast notification */}
       {toast && (

@@ -1,9 +1,11 @@
-"use client";
+﻿"use client";
 
 import React, { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ExpertPicker } from "@/components/project/expert-picker";
+import { TemplatePicker } from "@/components/projects/template-picker";
+import { ExpertRecommendation } from "@/components/projects/expert-recommendation";
 
 const MAX_TITLE_LENGTH = 200;
 
@@ -30,7 +32,7 @@ export default function NewProjectPage() {
     setSubmitting(true);
 
     try {
-      const res = await fetch("/api/projects", {
+      const res = await fetch("/api/v1/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -79,6 +81,14 @@ export default function NewProjectPage() {
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-6">
+          {/* Template picker */}
+          <TemplatePicker
+            onSelect={({ title: tplTitle, expertIds }) => {
+              if (tplTitle) setTitle(tplTitle);
+              if (expertIds.length > 0) setSelectedIds(expertIds);
+            }}
+          />
+
           {/* Title input */}
           <div>
             <label htmlFor="title" className="mb-1 block text-sm font-medium text-gray-700">
@@ -108,6 +118,14 @@ export default function NewProjectPage() {
                 已选择 {selectedIds.length} 位（至少 2 位）
               </span>
             </div>
+            {title.trim().length > 3 && (
+              <div className="mb-3">
+                <ExpertRecommendation
+                  title={title}
+                  onRecommend={(ids) => setSelectedIds(ids)}
+                />
+              </div>
+            )}
             <ExpertPicker selectedIds={selectedIds} onChange={setSelectedIds} />
           </div>
 
