@@ -49,7 +49,7 @@ log("运行 @electron/rebuild（better-sqlite3）...");
 const bin =
   path.join(root, "node_modules", ".bin", "electron-rebuild") +
   (process.platform === "win32" ? ".cmd" : "");
-const r = spawnSync(bin, ["-f", "-w", "better-sqlite3"], {
+const r = spawnSync(bin, ["-f", "-o", "better-sqlite3"], {
   cwd: root,
   stdio: "inherit",
   shell: true,
